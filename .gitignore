@@ -1,0 +1,4 @@
+node_modules
+file/store/*
+file/temp/*
+!placeholder.txt
