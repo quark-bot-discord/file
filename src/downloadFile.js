@@ -13,9 +13,10 @@ const hash = require("hash.js");
  * @param {BigInt} attachment_id ID of the attachment
  * @param {Number} premium_tier Premium tier of the guild
  * @param {Number} file_size Size of the file to download, in bytes
+ * @param {Boolean} quark_premium Whether this guild has Quark premium, so the file sweeper knows to leave this file for longer (ideally we shouldn't be leaving any way to distinguish files from other files, however there are so many other variables an attacker would have to know and so little storage space on the server that it makes it not worth storing every file for longer than it needs to be stored)
  * @returns {Promise}
  */
-function downloadFile(url, guild_id, channel_id, attachment_id, premium_tier, file_size) {
+function downloadFile(url, guild_id, channel_id, attachment_id, premium_tier, file_size, quark_premium) {
     return new Promise(async (resolve, reject) => {
         /* determines the maximum file size that all non-nitro users in this guild can upload */
         const maxFileSize = checkMaxAttachmentSize(premium_tier);
@@ -55,7 +56,7 @@ function downloadFile(url, guild_id, channel_id, attachment_id, premium_tier, fi
             /* the filename will look something like this: 5f3c36aa5f7c478cac84052271b18a78d064004af9a45f3d54005dfd1b8d11044c935a89590be7c8c7d1ce23a05c112f020d6857aa1880c776e5ea395e055a94.enc */
             /* the hash cannot be reversed, which means that you'd need to know the URL of the file if you wanted to access it */
             /* and similar to before, if you already know the URL of the file, you'd have access to this file anyway */
-            .pipe(createWriteStream(`${process.cwd()}/file/store/${hash.sha512().update(url).digest("hex")}.enc`))
+            .pipe(createWriteStream(`${process.cwd()}/file/store/${quark_premium == true ? '1' : '0'}_${hash.sha512().update(url).digest("hex")}.enc`))
             .on("error", error => {
                 return reject(error);
             })

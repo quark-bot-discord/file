@@ -10,12 +10,13 @@ const hash = require("hash.js");
  * @param {BigInt} channel_id ID of the channel that the attachment was sent to
  * @param {BigInt} attachment_id ID of the attachment
  * @param {Number} file_size Size of the file, in bytes
+ * @param {Boolean} quark_premium Whether this guild has Quark premium
  * @returns {Promise<Object>}
  */
-function fetchFile(url, guild_id, channel_id, attachment_id, file_size) {
+function fetchFile(url, guild_id, channel_id, attachment_id, file_size, quark_premium) {
     return new Promise((resolve, reject) => {
         /* we know the URL of the file, so we can hash that to calculate the name of the file */
-        const path = `${process.cwd()}/file/store/${hash.sha512().update(url).digest("hex")}.enc`;
+        const path = `${process.cwd()}/file/store/${quark_premium == true ? '1' : '0'}_${hash.sha512().update(url).digest("hex")}.enc`;
         /* we should then check that the file exists */
         /* files are deleted after a period of time, or sometimes have not been downloaded */
         if (path && existsSync(path)) {
