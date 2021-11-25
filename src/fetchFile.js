@@ -27,7 +27,7 @@ function fetchFile(url, guild_id, channel_id, attachment_id, file_size, quark_pr
                     /* now we can decrypt the file */
                     /* the key and iv must be recalculated using the IDs connected with the file, similar to before */
                     /* if we don't have the correct info, we cannot decrypt the file */
-                    .pipe(createDecipheriv("aes-256-cbc", hash.sha512().update(`${hash.sha512().update(`${guild_id}${channel_id}${attachment_id}${file_size}`).digest("hex")}${url}`).digest("hex").slice(0, 32), hash.sha512().update(`${hash.sha512().update(`${guild_id}${channel_id}${attachment_id}`).digest("hex")}${file_size}`).digest("hex").slice(0, 16)))
+                    .pipe(createDecipheriv("aes-256-cbc", hash.sha512().update(`${hash.sha512().update(`${guild_id}${channel_id}${attachment_id}${file_size}`).digest("hex")}${url}`).digest("hex").slice(0, 32), hash.sha512().update(`${hash.sha512().update(`${guild_id}${channel_id}${attachment_id}`).digest("hex")}${file_size}`).digest("hex").slice(0, 16)).setAutoPadding(false))
                     /* next we can decompress the file */
                     .pipe(createGunzip());
                 /* we'll return the path of the file (so it can be deleted once we're done with it) */
