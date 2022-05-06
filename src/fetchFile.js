@@ -20,9 +20,10 @@ function fetchFile(url, guild_id, channel_id, attachment_id, file_size, quark_pr
         /* we know the URL of the file, so we can hash that to calculate the name of the file */
         const path0 = `${process.cwd()}/file/store/${quark_premium == true ? '1' : '0'}_0_${hash.sha512().update(url).digest("hex")}.enc`;
         const path1 = `${process.cwd()}/file/store/${quark_premium == true ? '1' : '0'}_1_${hash.sha512().update(url).digest("hex")}.enc`;
-        if (path0 && existsSync(path0)) {
+        /* check if the file has fully downloaded or not yet */
+        /* if the file has not yet been downloaded, we should wait for 10 seconds before resuming */
+        if (path0 && existsSync(path0))
             await sleep(10000);
-        }
         /* we should then check that the file exists */
         /* files are deleted after a period of time, or sometimes have not been downloaded */
         if (path1 && existsSync(path1)) {
@@ -38,7 +39,7 @@ function fetchFile(url, guild_id, channel_id, attachment_id, file_size, quark_pr
                     .pipe(createGunzip());
                 /* we'll return the path of the file (so it can be deleted once we're done with it) */
                 /* and we'll also return the read stream to the file, which is used to upload the file to the serverlog */
-                return resolve({ path1, stream });
+                return resolve({ path: path1, stream });
             } catch (_) {
                 /* if we encounter an error here, it's usually down to some issue with the decryption */
                 /* we should catch the error so it doesn't crash everything */
