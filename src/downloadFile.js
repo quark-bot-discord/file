@@ -1,4 +1,4 @@
-const { createWriteStream } = require("fs");
+const { createWriteStream, rename } = require("fs");
 const fetch = require("node-fetch");
 const checkMaxAttachmentSize = require("./checkMaxAttachmentSize");
 const { createGzip } = require("zlib");
@@ -31,6 +31,10 @@ function downloadFile(url, guild_id, channel_id, attachment_id, premium_tier, fi
         /* at present, there is little point in attempting to re-download the file */
         if (!res.ok)
             return reject(`Error when downloading file, got status ${res.status}`);
+        /* the first file name indicates the file hasn't been fully downloaded yet, so shouldn't be touched */
+        /* the second file name indicates the file has been downloaded */
+        const fileName0 = `${process.cwd()}/file/store/${quark_premium == true ? '1' : '0'}_0_${hash.sha512().update(url).digest("hex")}.enc`;
+        const fileName1 = `${process.cwd()}/file/store/${quark_premium == true ? '1' : '0'}_1_${hash.sha512().update(url).digest("hex")}.enc`;
         /* we now have a stream of the file */
         res.body
             .on("error", error => {
@@ -56,11 +60,15 @@ function downloadFile(url, guild_id, channel_id, attachment_id, premium_tier, fi
             /* the filename will look something like this: 5f3c36aa5f7c478cac84052271b18a78d064004af9a45f3d54005dfd1b8d11044c935a89590be7c8c7d1ce23a05c112f020d6857aa1880c776e5ea395e055a94.enc */
             /* the hash cannot be reversed, which means that you'd need to know the URL of the file if you wanted to access it */
             /* and similar to before, if you already know the URL of the file, you'd have access to this file anyway */
-            .pipe(createWriteStream(`${process.cwd()}/file/store/${quark_premium == true ? '1' : '0'}_${hash.sha512().update(url).digest("hex")}.enc`))
+            .pipe(createWriteStream(fileName0))
             .on("error", error => {
                 return reject(error);
             })
             .on("close", () => {
+                /* rename the file to indicate it has fully downloaded */
+                rename(fileName0, fileName1, error => {
+                    return reject(error);
+                });
                 /* essentially, the security comes from the fact that in order to access this data, you need to know specific details about the data you want to access beforehand */
                 /* and now we can just resolve the promise in order to indicate that everything went well */
                 return resolve();
