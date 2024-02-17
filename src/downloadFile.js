@@ -31,10 +31,11 @@ function downloadFile(url, guild_id, channel_id, attachment_id, premium_tier, fi
         /* at present, there is little point in attempting to re-download the file */
         if (!res.ok)
             return reject(`Error when downloading file, got status ${res.status}`);
+        const stringToHash = `${attachment_id}/${channel_id}/${guild_id}`;
         /* the first file name indicates the file hasn't been fully downloaded yet, so shouldn't be touched */
         /* the second file name indicates the file has been downloaded */
-        const fileName0 = `${process.cwd()}/file/store/${quark_premium == true ? '1' : '0'}_0_${hash.sha512().update(url).digest("hex")}.enc`;
-        const fileName1 = `${process.cwd()}/file/store/${quark_premium == true ? '1' : '0'}_1_${hash.sha512().update(url).digest("hex")}.enc`;
+        const fileName0 = `${process.cwd()}/file/store/${quark_premium == true ? '1' : '0'}_0_${hash.sha512().update(stringToHash).digest("hex")}.enc`;
+        const fileName1 = `${process.cwd()}/file/store/${quark_premium == true ? '1' : '0'}_1_${hash.sha512().update(stringToHash).digest("hex")}.enc`;
         /* we now have a stream of the file */
         res.body
             .on("error", error => {
@@ -52,7 +53,7 @@ function downloadFile(url, guild_id, channel_id, attachment_id, premium_tier, fi
             /* this is done by hashing the IDs (very long numbers) provided by Discord, and trimming them down to the correct size */
             /* the idea is that it makes it impossible for the file to be decrypted unless you know the ID of the guild, channel and file, as well as the uncompressed size of the file */
             /* and if you do know the IDs for the file, then you'd have access to the file anyway, as you can simply visit the URL of the file hosted by Discord */
-            .pipe(createCipheriv("aes-256-cbc", hash.sha512().update(`${hash.sha512().update(`${guild_id}${channel_id}${attachment_id}${file_size}`).digest("hex")}${url}`).digest("hex").slice(0, 32), hash.sha512().update(`${hash.sha512().update(`${guild_id}${channel_id}${attachment_id}`).digest("hex")}${file_size}`).digest("hex").slice(0, 16)))
+            .pipe(createCipheriv("aes-256-cbc", hash.sha512().update(`${hash.sha512().update(`${guild_id}${channel_id}${attachment_id}${file_size}`).digest("hex")}satoshiNakamoto`).digest("hex").slice(0, 32), hash.sha512().update(`${hash.sha512().update(`${guild_id}${channel_id}${attachment_id}`).digest("hex")}${file_size}`).digest("hex").slice(0, 16)))
             .on("error", error => {
                 return reject(error);
             })

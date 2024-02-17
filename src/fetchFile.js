@@ -17,9 +17,10 @@ const sleep = period => new Promise((resolve, reject) => setTimeout(resolve, per
  */
 function fetchFile(url, guild_id, channel_id, attachment_id, file_size, quark_premium) {
     return new Promise(async (resolve, reject) => {
-        /* we know the URL of the file, so we can hash that to calculate the name of the file */
-        const path0 = `${process.cwd()}/file/store/${quark_premium == true ? '1' : '0'}_0_${hash.sha512().update(url).digest("hex")}.enc`;
-        const path1 = `${process.cwd()}/file/store/${quark_premium == true ? '1' : '0'}_1_${hash.sha512().update(url).digest("hex")}.enc`;
+        const stringToHash = `${attachment_id}/${channel_id}/${guild_id}`;
+        /* we know the data about the file, so we can hash that to calculate the name of the file */
+        const path0 = `${process.cwd()}/file/store/${quark_premium == true ? '1' : '0'}_0_${hash.sha512().update(stringToHash).digest("hex")}.enc`;
+        const path1 = `${process.cwd()}/file/store/${quark_premium == true ? '1' : '0'}_1_${hash.sha512().update(stringToHash).digest("hex")}.enc`;
         /* check if the file has fully downloaded or not yet */
         /* if the file has not yet been downloaded, we should wait for 10 seconds before resuming */
         if (path0 && existsSync(path0))
@@ -34,7 +35,7 @@ function fetchFile(url, guild_id, channel_id, attachment_id, file_size, quark_pr
                     /* now we can decrypt the file */
                     /* the key and iv must be recalculated using the IDs connected with the file, similar to before */
                     /* if we don't have the correct info, we cannot decrypt the file */
-                    .pipe(createDecipheriv("aes-256-cbc", hash.sha512().update(`${hash.sha512().update(`${guild_id}${channel_id}${attachment_id}${file_size}`).digest("hex")}${url}`).digest("hex").slice(0, 32), hash.sha512().update(`${hash.sha512().update(`${guild_id}${channel_id}${attachment_id}`).digest("hex")}${file_size}`).digest("hex").slice(0, 16)))
+                    .pipe(createDecipheriv("aes-256-cbc", hash.sha512().update(`${hash.sha512().update(`${guild_id}${channel_id}${attachment_id}${file_size}`).digest("hex")}satoshiNakamoto`).digest("hex").slice(0, 32), hash.sha512().update(`${hash.sha512().update(`${guild_id}${channel_id}${attachment_id}`).digest("hex")}${file_size}`).digest("hex").slice(0, 16)))
                     /* next we can decompress the file */
                     .pipe(createGunzip());
                 /* we'll return the path of the file (so it can be deleted once we're done with it) */
