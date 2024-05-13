@@ -15,12 +15,12 @@ const sleep = period => new Promise((resolve, reject) => setTimeout(resolve, per
  * @param {Boolean} quark_premium Whether this guild has Quark premium
  * @returns {Promise<Object>}
  */
-function fetchFile(url, guild_id, channel_id, attachment_id, file_size, quark_premium) {
+function fetchFile(url, guild_id, channel_id, attachment_id, file_size, quark_premium, key = null) {
     return new Promise(async (resolve, reject) => {
         const stringToHash = `${attachment_id}/${channel_id}/${guild_id}`;
         /* we know the data about the file, so we can hash that to calculate the name of the file */
-        const path0 = `${process.cwd()}/file/store/${quark_premium == true ? '1' : '0'}_0_${hash.sha512().update(stringToHash).digest("hex")}.enc`;
-        const path1 = `${process.cwd()}/file/store/${quark_premium == true ? '1' : '0'}_1_${hash.sha512().update(stringToHash).digest("hex")}.enc`;
+        const path0 = `${process.cwd()}/file/store/${key != null ? `${key}_` : ''}${quark_premium == true ? '1' : '0'}_0_${hash.sha512().update(stringToHash).digest("hex")}.enc`;
+        const path1 = `${process.cwd()}/file/store/${key != null ? `${key}_` : ''}${quark_premium == true ? '1' : '0'}_1_${hash.sha512().update(stringToHash).digest("hex")}.enc`;
         /* check if the file has fully downloaded or not yet */
         /* if the file has not yet been downloaded, we should wait for 10 seconds before resuming */
         if (path0 && existsSync(path0))

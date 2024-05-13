@@ -16,7 +16,7 @@ const hash = require("hash.js");
  * @param {Boolean} quark_premium Whether this guild has Quark premium, so the file sweeper knows to leave this file for longer (ideally we shouldn't be leaving any way to distinguish files from other files, however there are so many other variables an attacker would have to know and so little storage space on the server that it makes it not worth storing every file for longer than it needs to be stored)
  * @returns {Promise}
  */
-function downloadFile(url, guild_id, channel_id, attachment_id, premium_tier, file_size, quark_premium) {
+function downloadFile(url, guild_id, channel_id, attachment_id, premium_tier, file_size, quark_premium, key = null) {
     return new Promise(async (resolve, reject) => {
         /* determines the maximum file size that all non-nitro users in this guild can upload */
         const maxFileSize = checkMaxAttachmentSize(premium_tier);
@@ -34,8 +34,8 @@ function downloadFile(url, guild_id, channel_id, attachment_id, premium_tier, fi
         const stringToHash = `${attachment_id}/${channel_id}/${guild_id}`;
         /* the first file name indicates the file hasn't been fully downloaded yet, so shouldn't be touched */
         /* the second file name indicates the file has been downloaded */
-        const fileName0 = `${process.cwd()}/file/store/${quark_premium == true ? '1' : '0'}_0_${hash.sha512().update(stringToHash).digest("hex")}.enc`;
-        const fileName1 = `${process.cwd()}/file/store/${quark_premium == true ? '1' : '0'}_1_${hash.sha512().update(stringToHash).digest("hex")}.enc`;
+        const fileName0 = `${process.cwd()}/file/store/${key != null ? `${key}_` : ''}${quark_premium == true ? '1' : '0'}_0_${hash.sha512().update(stringToHash).digest("hex")}.enc`;
+        const fileName1 = `${process.cwd()}/file/store/${key != null ? `${key}_` : ''}${quark_premium == true ? '1' : '0'}_1_${hash.sha512().update(stringToHash).digest("hex")}.enc`;
         /* we now have a stream of the file */
         res.body
             .on("error", error => {
