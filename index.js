@@ -38,6 +38,10 @@ class FileStorage {
                     }
                 ]
             }
+        }, (err, data) => {
+            if (err)
+                console.log(err);
+        
         });
 
     }
