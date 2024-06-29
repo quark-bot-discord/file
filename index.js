@@ -106,7 +106,7 @@ class FileStorage {
         const bufferStream = new PassThrough();
         bufferStream.end(raw.Body);
 
-        return _fetchFile(bufferStream, encryptionKey, encryptionIv);
+        return { stream: _fetchFile(bufferStream, encryptionKey, encryptionIv), size: raw.ContentLength };
 
     }
 
