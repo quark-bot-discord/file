@@ -6,6 +6,8 @@ const _fetchFile = require('./src/fetchFile');
 const checkMaxAttachmentSize = require("./src/checkMaxAttachmentSize");
 const sortFiles = require("./src/sortFiles");
 
+const sleep = period => new Promise((resolve, reject) => setTimeout(resolve, period));
+
 class FileStorage {
     constructor({ s3Url, s3FileBucket, s3AccessKeyId, s3SecretAccessKey }) {
 
@@ -105,10 +107,29 @@ class FileStorage {
 
         const { key: encryptionKey, iv: encryptionIv } = this.getEncryptionKeys(guild_id, channel_id, attachment_id, file_size);
 
-        const raw = await this.s3Files.getObject({
-            Bucket: this.s3FileBucket,
-            Key: fileName
-        }).promise();
+        let raw;
+
+        try {
+
+            raw = await this.s3Files.getObject({
+                Bucket: this.s3FileBucket,
+                Key: fileName
+            }).promise();
+
+        } catch (error) {
+
+            if (error.statusCode == 404) {
+                await sleep(10000);
+                raw = await this.s3Files.getObject({
+                    Bucket: this.s3FileBucket,
+                    Key: fileName
+                }).promise();
+            } else
+                throw error;
+
+            return null;
+
+        }
 
         const bufferStream = new PassThrough();
         bufferStream.end(raw.Body);
