@@ -35,6 +35,16 @@ class FileStorage {
                             Prefix: ''
                         },
                         ID: 'DeleteOldFiles',
+                    },
+                    {
+                        Expiration: {
+                            Days: 1
+                        },
+                        Status: "Enabled",
+                        Filter: {
+                            Prefix: '0_'
+                        },
+                        ID: 'DeleteStandardFiles'
                     }
                 ]
             }
@@ -76,7 +86,7 @@ class FileStorage {
 
         const stringToHash = `${attachment_id}/${channel_id}/${guild_id}`;
 
-        return `${key != null ? `${key}_` : ''}${quark_premium == true ? '1' : '0'}_1_${hash.sha512().update(stringToHash).digest("hex")}.enc`;
+        return `${key != null ? `${key}_` : ''}${quark_premium == true ? '1' : '0'}_${hash.sha512().update(stringToHash).digest("hex")}.enc`;
 
     }
 
