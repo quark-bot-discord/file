@@ -4,6 +4,7 @@ const AWS = require('aws-sdk');
 const _downloadFile = require('./src/downloadFile');
 const _fetchFile = require('./src/fetchFile');
 const checkMaxAttachmentSize = require("./src/checkMaxAttachmentSize");
+const sortFiles = require("./src/sortFiles");
 
 class FileStorage {
     constructor({ s3Url, s3FileBucket, s3AccessKeyId, s3SecretAccessKey }) {
@@ -50,6 +51,12 @@ class FileStorage {
     checkMaxAttachmentSize(premium_tier) {
 
         return checkMaxAttachmentSize(premium_tier);
+
+    }
+
+    sortFiles(files) {
+
+        return sortFiles(files);
 
     }
 
