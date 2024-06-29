@@ -60,9 +60,9 @@ class FileStorage {
 
     }
 
-    sortFiles(files) {
+    sortFiles(files, maxSize) {
 
-        return sortFiles(files);
+        return sortFiles(files, maxSize);
 
     }
 
