@@ -19,6 +19,24 @@ class FileStorage {
 
         this.s3Files = s3Files;
 
+        this.s3Files.putBucketLifecycleConfiguration({
+            Bucket: s3FileBucket,
+            LifecycleConfiguration: {
+                Rules: [
+                    {
+                        Expiration: {
+                            Days: 56
+                        },
+                        Status: "Enabled",
+                        Filter: {
+                            Prefix: ''
+                        },
+                        ID: 'DeleteOldFiles',
+                    }
+                ]
+            }
+        });
+
     }
 
     uploadStream({ Bucket, Key }) {
