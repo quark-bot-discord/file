@@ -113,10 +113,18 @@ class FileStorage {
         const bufferStream = new PassThrough();
         bufferStream.end(raw.Body);
 
-        return { stream: _fetchFile(bufferStream, encryptionKey, encryptionIv), size: raw.ContentLength };
+        return { stream: _fetchFile(bufferStream, encryptionKey, encryptionIv), size: raw.ContentLength, name: fileName };
 
     }
 
+    deleteFile(name) {
+
+        return this.s3Files.deleteObject({
+            Bucket: this.s3FileBucket,
+            Key: name
+        }).promise();
+
+    }
 
 }
 
