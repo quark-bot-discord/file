@@ -41,7 +41,7 @@ class FileStorage {
         }, (err, data) => {
             if (err)
                 console.log(err);
-        
+
         });
 
     }
@@ -148,6 +148,27 @@ class FileStorage {
             Bucket: this.s3FileBucket,
             Key: name
         }).promise();
+
+    }
+
+    async checkFileExists(attachment_id, channel_id, guild_id, quark_premium, key = null) {
+
+        const fileName = this.getFileName(attachment_id, channel_id, guild_id, quark_premium, key);
+
+        try {
+
+            await this.s3Files.headObject({
+                Bucket: this.s3FileBucket,
+                Key: fileName
+            }).promise();
+
+            return true;
+
+        } catch (error) {
+
+            return false;
+
+        }
 
     }
 
