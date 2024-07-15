@@ -13,7 +13,7 @@ function _downloadFile(url, key, iv) {
     return new Promise(async (resolve, reject) => {
         const res = await fetch(url);
         if (!res.ok)
-            return reject(`Error when downloading file, got status ${res.status}`);
+            return reject(new Error(`Error when downloading file, got status ${res.status}`));
         const stream = res.body
             .on("error", error => {
                 return reject(error);

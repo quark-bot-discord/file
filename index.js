@@ -95,7 +95,7 @@ class FileStorage {
         const maxFileSize = this.checkMaxAttachmentSize(premium_tier);
 
         if (maxFileSize < file_size)
-            return new Error("File too big");
+            throw new Error("File too big");
 
         const fileName = this.getFileName(attachment_id, channel_id, guild_id, quark_premium, key);
 
