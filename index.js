@@ -78,7 +78,7 @@ class FileStorage {
 
     getEncryptionKeys(guild_id, channel_id, attachment_id, file_size) {
 
-        return { key: hash.sha512().update(`${hash.sha512().update(`${guild_id}${channel_id}${attachment_id}${file_size}`).digest("hex")}satoshiNakamoto`).digest("hex").slice(0, 32), iv: hash.sha512().update(`${hash.sha512().update(`${guild_id}${channel_id}${attachment_id}`).digest("hex")}${file_size}`).digest("hex").slice(0, 16) };
+        return { key: hash.sha512().update(`${hash.sha512().update(`${String(guild_id)}${String(channel_id)}${String(attachment_id)}${String(file_size)}`).digest("hex")}satoshiNakamoto`).digest("hex").slice(0, 32), iv: hash.sha512().update(`${hash.sha512().update(`${String(guild_id)}${String(channel_id)}${String(attachment_id)}`).digest("hex")}${String(file_size)}`).digest("hex").slice(0, 16) };
 
     }
 
@@ -121,23 +121,23 @@ class FileStorage {
 
         const { key: encryptionKey, iv: encryptionIv } = this.getEncryptionKeys(guild_id, channel_id, attachment_id, file_size);
 
-        let raw;
+        let rawStream;
 
         try {
 
-            raw = await this.s3Files.getObject({
+            rawStream = this.s3Files.getObject({
                 Bucket: this.s3FileBucket,
                 Key: fileName
-            }).promise();
+            }).createReadStream();
 
         } catch (error) {
 
             if (error.statusCode == 404) {
                 await sleep(10000);
-                raw = await this.s3Files.getObject({
+                rawStream = this.s3Files.getObject({
                     Bucket: this.s3FileBucket,
                     Key: fileName
-                }).promise();
+                }).createReadStream();
             } else
                 throw error;
 
@@ -145,10 +145,9 @@ class FileStorage {
 
         }
 
-        const bufferStream = new PassThrough();
-        bufferStream.end(raw.Body);
+        const stream = _fetchFile(rawStream, encryptionKey, encryptionIv);
 
-        return { stream: _fetchFile(bufferStream, encryptionKey, encryptionIv), size: raw.ContentLength, name: fileName };
+        return { stream, name: fileName };
 
     }
 
