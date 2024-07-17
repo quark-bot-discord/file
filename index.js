@@ -28,7 +28,7 @@ class FileStorage {
                 Rules: [
                     {
                         Expiration: {
-                            Days: 56
+                            Days: 30
                         },
                         Status: "Enabled",
                         Filter: {
