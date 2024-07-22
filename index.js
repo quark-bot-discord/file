@@ -121,23 +121,23 @@ class FileStorage {
 
         const { key: encryptionKey, iv: encryptionIv } = this.getEncryptionKeys(guild_id, channel_id, attachment_id, file_size);
 
-        let rawStream;
+        let raw;
 
         try {
 
-            rawStream = this.s3Files.getObject({
+            raw = await this.s3Files.getObject({
                 Bucket: this.s3FileBucket,
                 Key: fileName
-            }).createReadStream();
+            }).promise();
 
         } catch (error) {
 
             if (error.statusCode == 404) {
                 await sleep(10000);
-                rawStream = this.s3Files.getObject({
+                raw = await this.s3Files.getObject({
                     Bucket: this.s3FileBucket,
                     Key: fileName
-                }).createReadStream();
+                }).promise();
             } else
                 throw error;
 
@@ -145,9 +145,10 @@ class FileStorage {
 
         }
 
-        const stream = _fetchFile(rawStream, encryptionKey, encryptionIv);
+        const bufferStream = new PassThrough();
+        bufferStream.end(raw.Body);
 
-        return { stream, name: fileName };
+        return { stream: _fetchFile(bufferStream, encryptionKey, encryptionIv), size: raw.ContentLength, name: fileName };
 
     }
 
