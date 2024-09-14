@@ -1,5 +1,5 @@
-const { createDecipheriv } = require("crypto");
-const { createGunzip } = require("zlib");
+import { createDecipheriv } from "crypto";
+import { createGunzip } from "zlib";
 
 /**
  * Fetches a file from a stream and decrypts it
@@ -8,12 +8,8 @@ const { createGunzip } = require("zlib");
  * @param {String} iv IV to decrypt the file with
  * @returns {Stream}
  */
-function _fetchFile(stream, key, iv) {
-
-    return stream
-        .pipe(createDecipheriv("aes-256-cbc", key, iv))
-        .pipe(createGunzip());
-
+export default function fetchFile(stream, key, iv) {
+  return stream
+    .pipe(createDecipheriv("aes-256-cbc", key, iv))
+    .pipe(createGunzip());
 }
-
-module.exports = _fetchFile;
