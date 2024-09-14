@@ -1,10 +1,10 @@
 import { sha512 } from "hash.js";
 import { PassThrough } from "stream";
 import { S3 } from "aws-sdk";
-import downloadFile from "./src/downloadFile";
-import fetchFile from "./src/fetchFile";
-import checkMaxAttachmentSize from "./src/checkMaxAttachmentSize";
-import sortFiles from "./src/sortFiles";
+import downloadFile from "./src/downloadFile.js";
+import fetchFile from "./src/fetchFile.js";
+import checkMaxAttachmentSize from "./src/checkMaxAttachmentSize.js";
+import sortFiles from "./src/sortFiles.js";
 
 const sleep = (period) =>
   new Promise((resolve, reject) => setTimeout(resolve, period));
