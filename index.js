@@ -1,8 +1,16 @@
-import { sha512 } from "hash.js";
+import hashjs from "hash.js";
+const { sha512 } = hashjs;
 import { PassThrough } from "stream";
-import { S3 } from "aws-sdk";
-import downloadFile from "./src/downloadFile.js";
-import fetchFile from "./src/fetchFile.js";
+import { Upload } from "@aws-sdk/lib-storage";
+import {
+  PutBucketLifecycleConfigurationCommand,
+  GetObjectCommand,
+  DeleteObjectCommand,
+  HeadObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
+import _downloadFile from "./src/downloadFile.js";
+import _fetchFile from "./src/fetchFile.js";
 import checkMaxAttachmentSize from "./src/checkMaxAttachmentSize.js";
 import sortFiles from "./src/sortFiles.js";
 
@@ -11,20 +19,25 @@ const sleep = (period) =>
 
 export default class FileStorage {
   constructor({ s3Url, s3FileBucket, s3AccessKeyId, s3SecretAccessKey }) {
-    const s3Files = new S3({
-      endpoint: `${s3Url}${s3FileBucket}`,
-      accessKeyId: s3AccessKeyId,
-      secretAccessKey: s3SecretAccessKey,
-      s3BucketEndpoint: true,
+    const s3Files = new S3Client({
+      endpoint: s3Url,
+      credentials: {
+        accessKeyId: s3AccessKeyId,
+        secretAccessKey: s3SecretAccessKey,
+      },
+      bucketEndpoint: true,
+      region: "se-sto-1",
     });
+
+    this.s3Url = s3Url;
 
     this.s3FileBucket = s3FileBucket;
 
     this.s3Files = s3Files;
 
-    this.s3Files.putBucketLifecycleConfiguration(
-      {
-        Bucket: s3FileBucket,
+    this.s3Files.send(
+      new PutBucketLifecycleConfigurationCommand({
+        Bucket: `${this.s3Url}${this.s3FileBucket}`,
         LifecycleConfiguration: {
           Rules: [
             {
@@ -49,10 +62,7 @@ export default class FileStorage {
             },
           ],
         },
-      },
-      (err, data) => {
-        if (err) console.log(err);
-      }
+      })
     );
   }
 
@@ -60,7 +70,18 @@ export default class FileStorage {
     const pass = new PassThrough();
     return {
       writeStream: pass,
-      promise: this.s3Files.upload({ Bucket, Key, Body: pass }).promise(),
+      promise: new Upload({
+        client: new S3Client({
+          endpoint: this.s3Url,
+          region: "se-sto-1",
+          credentials: this.s3Files.config.credentials,
+        }),
+        params: {
+          Bucket,
+          Key,
+          Body: pass,
+        },
+      }).done(),
     };
   }
 
@@ -136,7 +157,7 @@ export default class FileStorage {
       file_size
     );
 
-    const stream = await downloadFile(url, encryptionKey, encryptionIv);
+    const stream = await _downloadFile(url, encryptionKey, encryptionIv);
 
     const { writeStream, promise } = this.uploadStream({
       Bucket: this.s3FileBucket,
@@ -174,43 +195,40 @@ export default class FileStorage {
     let raw;
 
     try {
-      raw = await this.s3Files
-        .getObject({
-          Bucket: this.s3FileBucket,
+      raw = await this.s3Files.send(
+        new GetObjectCommand({
+          Bucket: `${this.s3Url}${this.s3FileBucket}`,
           Key: fileName,
         })
-        .promise();
+      );
     } catch (error) {
       if (error.statusCode == 404) {
         await sleep(10000);
-        raw = await this.s3Files
-          .getObject({
-            Bucket: this.s3FileBucket,
+        raw = await this.s3Files.send(
+          new GetObjectCommand({
+            Bucket: `${this.s3Url}${this.s3FileBucket}`,
             Key: fileName,
           })
-          .promise();
+        );
       } else throw error;
 
       return null;
     }
 
-    const bufferStream = new PassThrough();
-    bufferStream.end(raw.Body);
-
     return {
-      stream: fetchFile(bufferStream, encryptionKey, encryptionIv),
+      stream: _fetchFile(raw.Body, encryptionKey, encryptionIv),
       size: raw.ContentLength,
       name: fileName,
     };
   }
 
   deleteFile(name) {
-    return this.s3Files
-      .deleteObject({
-        Bucket: this.s3FileBucket,
+    return this.s3Files.send(
+      new DeleteObjectCommand({
+        Bucket: `${this.s3Url}${this.s3FileBucket}`,
         Key: name,
       })
-      .promise();
+    );
   }
 
   async checkFileExists(
@@ -229,12 +247,12 @@ export default class FileStorage {
     );
 
     try {
-      await this.s3Files
-        .headObject({
-          Bucket: this.s3FileBucket,
+      await this.s3Files.send(
+        new HeadObjectCommand({
+          Bucket: `${this.s3Url}${this.s3FileBucket}`,
           Key: fileName,
         })
-        .promise();
+      );
 
       return true;
     } catch (error) {
