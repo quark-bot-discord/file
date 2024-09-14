@@ -1,4 +1,4 @@
-export { default as downloadFile } from "./src/downloadFile";
-export { default as fetchFile } from "./src/fetchFile";
-export { default as sortFiles } from "./src/sortFiles";
-export { default as checkMaxAttachmentSize } from "./src/checkMaxAttachmentSize";
+export { default as downloadFile } from "./src/downloadFile.js";
+export { default as fetchFile } from "./src/fetchFile.js";
+export { default as sortFiles } from "./src/sortFiles.js";
+export { default as checkMaxAttachmentSize } from "./src/checkMaxAttachmentSize.js";

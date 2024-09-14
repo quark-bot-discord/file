@@ -1,6 +1,6 @@
 import { createWriteStream, rename } from "fs";
 import fetch from "node-fetch";
-import checkMaxAttachmentSize from "./checkMaxAttachmentSize";
+import checkMaxAttachmentSize from "./checkMaxAttachmentSize.js";
 import { createGzip } from "zlib";
 import { createCipheriv } from "crypto";
 import { sha512 } from "hash.js";
