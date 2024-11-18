@@ -18,7 +18,7 @@ const sleep = (period) =>
   new Promise((resolve, reject) => setTimeout(resolve, period));
 
 export default class FileStorage {
-  constructor({ s3Url, s3FileBucket, s3AccessKeyId, s3SecretAccessKey }) {
+  constructor({ s3Url, s3FileBucket, s3AccessKeyId, s3SecretAccessKey, s3Region, fileExpirationDaysStandard, fileExpirationDaysExtended }) {
     const s3Files = new S3Client({
       endpoint: s3Url,
       credentials: {
@@ -26,10 +26,12 @@ export default class FileStorage {
         secretAccessKey: s3SecretAccessKey,
       },
       bucketEndpoint: true,
-      region: "se-sto-1",
+      region: s3Region,
     });
 
     this.s3Url = s3Url;
+
+    this.s3Region = s3Region;
 
     this.s3FileBucket = s3FileBucket;
 
@@ -42,7 +44,7 @@ export default class FileStorage {
           Rules: [
             {
               Expiration: {
-                Days: 30,
+                Days: fileExpirationDaysExtended,
               },
               Status: "Enabled",
               Filter: {
@@ -52,7 +54,7 @@ export default class FileStorage {
             },
             {
               Expiration: {
-                Days: 1,
+                Days: fileExpirationDaysStandard,
               },
               Status: "Enabled",
               Filter: {
@@ -73,7 +75,7 @@ export default class FileStorage {
       promise: new Upload({
         client: new S3Client({
           endpoint: this.s3Url,
-          region: "se-sto-1",
+          region: this.s3Region,
           credentials: this.s3Files.config.credentials,
         }),
         params: {
