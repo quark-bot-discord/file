@@ -17,6 +17,8 @@ import sortFiles from "./src/sortFiles.js";
 const sleep = (period) =>
   new Promise((resolve, reject) => setTimeout(resolve, period));
 
+export { checkMaxAttachmentSize, sortFiles };
+
 export default class FileStorage {
   constructor({ s3Url, s3FileBucket, s3AccessKeyId, s3SecretAccessKey, s3Region, fileExpirationDaysStandard, fileExpirationDaysExtended }) {
     const s3Files = new S3Client({
