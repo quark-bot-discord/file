@@ -7,27 +7,38 @@ import { createCipheriv } from "crypto";
  * @param {String} url URL to download the file from
  * @param {String} key Key to decrypt the file with
  * @param {String} iv IV to decrypt the file with
- * @returns {Promise<Stream>}
+ * @returns {Promise<ReadableStream>}
  */
-export default function downloadFile(url, key, iv) {
-  return new Promise(async (resolve, reject) => {
+export default async function downloadFile(url, key, iv) {
+  if (!url || !key || !iv) {
+    throw new Error("Invalid parameters: url, key, and iv are required");
+  }
+
+  try {
     const res = await fetch(url);
-    if (!res.ok)
-      return reject(
-        new Error(`Error when downloading file, got status ${res.status}`)
-      );
+    if (!res.ok) {
+      throw new Error(`Error when downloading file, got status ${res.status}`);
+    }
+
+    if (!res.body) {
+      throw new Error("Response body is null");
+    }
+
     const stream = res.body
       .on("error", (error) => {
-        return reject(error);
+        throw error;
       })
       .pipe(createGzip())
       .on("error", (error) => {
-        return reject(error);
+        throw error;
       })
       .pipe(createCipheriv("aes-256-cbc", key, iv))
       .on("error", (error) => {
-        return reject(error);
+        throw error;
       });
-    return resolve(stream);
-  });
+
+    return stream;
+  } catch (error) {
+    throw new Error(`Failed to download and process file: ${error.message}`);
+  }
 }
