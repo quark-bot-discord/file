@@ -20,7 +20,10 @@ const sleep = (period) =>
 export { checkMaxAttachmentSize, sortFiles };
 
 export default class FileStorage {
-  constructor({ s3Url, s3FileBucket, s3AccessKeyId, s3SecretAccessKey, s3Region, fileExpirationDaysStandard, fileExpirationDaysExtended }) {
+  constructor({ s3Url, s3FileBucket, s3AccessKeyId, s3SecretAccessKey, s3Region, fileExpirationDaysStandard, fileExpirationDaysExtended, downloadIp }) {
+
+    this.downloadIp = downloadIp;
+
     const s3Files = new S3Client({
       endpoint: s3Url,
       credentials: {
@@ -161,7 +164,7 @@ export default class FileStorage {
       file_size
     );
 
-    const stream = await _downloadFile(url, encryptionKey, encryptionIv);
+    const stream = await _downloadFile(url, encryptionKey, encryptionIv, this.downloadIp);
 
     const { writeStream, promise } = this.uploadStream({
       Bucket: this.s3FileBucket,

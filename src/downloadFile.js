@@ -1,6 +1,7 @@
 import fetch from "node-fetch";
 import { createGzip } from "zlib";
 import { createCipheriv } from "crypto";
+import https from "https";
 
 /**
  * Downloads a file from a URL and decrypts it
@@ -9,13 +10,15 @@ import { createCipheriv } from "crypto";
  * @param {String} iv IV to decrypt the file with
  * @returns {Promise<ReadableStream>}
  */
-export default async function downloadFile(url, key, iv) {
+export default async function downloadFile(url, key, iv, ip) {
   if (!url || !key || !iv) {
     throw new Error("Invalid parameters: url, key, and iv are required");
   }
 
+  const agent = new https.Agent({ localAddress: ip });
+
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, { agent });
     if (!res.ok) {
       throw new Error(`Error when downloading file, got status ${res.status}`);
     }
