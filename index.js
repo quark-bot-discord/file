@@ -8,6 +8,7 @@ import {
   DeleteObjectCommand,
   HeadObjectCommand,
   S3Client,
+  NoSuchKey,
 } from "@aws-sdk/client-s3";
 import _downloadFile from "./src/downloadFile.js";
 import _fetchFile from "./src/fetchFile.js";
@@ -17,7 +18,7 @@ import sortFiles from "./src/sortFiles.js";
 const sleep = (period) =>
   new Promise((resolve, reject) => setTimeout(resolve, period));
 
-export { checkMaxAttachmentSize, sortFiles };
+export { checkMaxAttachmentSize, sortFiles, NoSuchKey };
 
 export default class FileStorage {
   constructor({ s3Url, s3FileBucket, s3AccessKeyId, s3SecretAccessKey, s3Region, fileExpirationDaysStandard, fileExpirationDaysExtended, downloadIp }) {

@@ -39,5 +39,6 @@ export default class FileStorage {
 }
 import checkMaxAttachmentSize from "./src/checkMaxAttachmentSize.js";
 import sortFiles from "./src/sortFiles.js";
+import { NoSuchKey } from "@aws-sdk/client-s3";
 import { S3Client } from "@aws-sdk/client-s3";
-export { checkMaxAttachmentSize, sortFiles };
+export { checkMaxAttachmentSize, sortFiles, NoSuchKey };
