@@ -30,6 +30,7 @@ export default class FileStorage {
     s3Region,
     fileExpirationDaysStandard,
     fileExpirationDaysExtended,
+    fileExpirationDaysUltraExtended,
     downloadIp,
   }) {
     this.downloadIp = downloadIp;
@@ -76,6 +77,16 @@ export default class FileStorage {
                 Prefix: "0_",
               },
               ID: "DeleteStandardFiles",
+            },
+            {
+              Expiration: {
+                Days: fileExpirationDaysUltraExtended,
+              },
+              Status: "Enabled",
+              Filter: {
+                Prefix: "2_",
+              },
+              ID: "DeleteUltraExtendedFiles",
             },
           ],
         },
@@ -137,10 +148,17 @@ export default class FileStorage {
     };
   }
 
-  getFileName(attachment_id, channel_id, guild_id, quark_premium, key = null) {
+  getFileName(
+    attachment_id,
+    channel_id,
+    guild_id,
+    quark_premium,
+    key = null,
+    extendedExpiration = false
+  ) {
     const stringToHash = `${attachment_id}/${channel_id}/${guild_id}`;
 
-    return `${key != null ? `${key}_` : ""}${
+    return `${extendedExpiration ? "2_" : ""}${key != null ? `${key}_` : ""}${
       quark_premium == true ? "1" : "0"
     }_${sha512().update(stringToHash).digest("hex")}.enc`;
   }
@@ -153,7 +171,8 @@ export default class FileStorage {
     premium_tier,
     file_size,
     quark_premium,
-    key = null
+    key = null,
+    extendedExpiration = false
   ) {
     const maxFileSize = this.checkMaxAttachmentSize(premium_tier);
 
@@ -164,7 +183,8 @@ export default class FileStorage {
       channel_id,
       guild_id,
       quark_premium,
-      key
+      key,
+      extendedExpiration
     );
 
     const { key: encryptionKey, iv: encryptionIv } = this.getEncryptionKeys(
@@ -197,14 +217,16 @@ export default class FileStorage {
     attachment_id,
     file_size,
     quark_premium,
-    key = null
+    key = null,
+    extendedExpiration = false
   ) {
     const fileName = this.getFileName(
       attachment_id,
       channel_id,
       guild_id,
       quark_premium,
-      key
+      key,
+      extendedExpiration
     );
 
     const { key: encryptionKey, iv: encryptionIv } = this.getEncryptionKeys(
@@ -269,14 +291,16 @@ export default class FileStorage {
     channel_id,
     guild_id,
     quark_premium,
-    key = null
+    key = null,
+    extendedExpiration = false
   ) {
     const fileName = this.getFileName(
       attachment_id,
       channel_id,
       guild_id,
       quark_premium,
-      key
+      key,
+      extendedExpiration
     );
 
     try {

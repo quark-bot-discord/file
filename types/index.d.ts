@@ -1,5 +1,5 @@
 export default class FileStorage {
-    constructor({ s3Url, s3FileBucket, s3AccessKeyId, s3SecretAccessKey, s3Region, fileExpirationDaysStandard, fileExpirationDaysExtended, downloadIp, }: {
+    constructor({ s3Url, s3FileBucket, s3AccessKeyId, s3SecretAccessKey, s3Region, fileExpirationDaysStandard, fileExpirationDaysExtended, fileExpirationDaysUltraExtended, downloadIp, }: {
         s3Url: any;
         s3FileBucket: any;
         s3AccessKeyId: any;
@@ -7,6 +7,7 @@ export default class FileStorage {
         s3Region: any;
         fileExpirationDaysStandard: any;
         fileExpirationDaysExtended: any;
+        fileExpirationDaysUltraExtended: any;
         downloadIp: any;
     });
     downloadIp: any;
@@ -27,16 +28,16 @@ export default class FileStorage {
         key: any;
         iv: any;
     };
-    getFileName(attachment_id: any, channel_id: any, guild_id: any, quark_premium: any, key?: any): string;
-    downloadFile(url: any, guild_id: any, channel_id: any, attachment_id: any, premium_tier: any, file_size: any, quark_premium: any, key?: any): Promise<import("@aws-sdk/client-s3").CompleteMultipartUploadCommandOutput>;
-    fetchFile(guild_id: any, channel_id: any, attachment_id: any, file_size: any, quark_premium: any, key?: any): Promise<{
+    getFileName(attachment_id: any, channel_id: any, guild_id: any, quark_premium: any, key?: any, extendedExpiration?: boolean): string;
+    downloadFile(url: any, guild_id: any, channel_id: any, attachment_id: any, premium_tier: any, file_size: any, quark_premium: any, key?: any, extendedExpiration?: boolean): Promise<import("@aws-sdk/client-s3").CompleteMultipartUploadCommandOutput>;
+    fetchFile(guild_id: any, channel_id: any, attachment_id: any, file_size: any, quark_premium: any, key?: any, extendedExpiration?: boolean): Promise<{
         stream: Stream;
         size: number;
         name: string;
     }>;
     deleteFile(name: any): Promise<import("@aws-sdk/client-s3").DeleteObjectCommandOutput>;
     bulkDeleteFiles(files: any): Promise<import("@aws-sdk/client-s3").DeleteObjectsCommandOutput>;
-    checkFileExists(attachment_id: any, channel_id: any, guild_id: any, quark_premium: any, key?: any): Promise<boolean>;
+    checkFileExists(attachment_id: any, channel_id: any, guild_id: any, quark_premium: any, key?: any, extendedExpiration?: boolean): Promise<boolean>;
 }
 import checkMaxAttachmentSize from "./src/checkMaxAttachmentSize.js";
 import sortFiles from "./src/sortFiles.js";
