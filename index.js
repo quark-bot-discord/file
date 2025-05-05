@@ -9,6 +9,7 @@ import {
   HeadObjectCommand,
   S3Client,
   NoSuchKey,
+  DeleteObjectsCommand,
 } from "@aws-sdk/client-s3";
 import _downloadFile from "./src/downloadFile.js";
 import _fetchFile from "./src/fetchFile.js";
@@ -21,8 +22,16 @@ const sleep = (period) =>
 export { checkMaxAttachmentSize, sortFiles, NoSuchKey };
 
 export default class FileStorage {
-  constructor({ s3Url, s3FileBucket, s3AccessKeyId, s3SecretAccessKey, s3Region, fileExpirationDaysStandard, fileExpirationDaysExtended, downloadIp }) {
-
+  constructor({
+    s3Url,
+    s3FileBucket,
+    s3AccessKeyId,
+    s3SecretAccessKey,
+    s3Region,
+    fileExpirationDaysStandard,
+    fileExpirationDaysExtended,
+    downloadIp,
+  }) {
     this.downloadIp = downloadIp;
 
     const s3Files = new S3Client({
@@ -165,7 +174,12 @@ export default class FileStorage {
       file_size
     );
 
-    const stream = await _downloadFile(url, encryptionKey, encryptionIv, this.downloadIp);
+    const stream = await _downloadFile(
+      url,
+      encryptionKey,
+      encryptionIv,
+      this.downloadIp
+    );
 
     const { writeStream, promise } = this.uploadStream({
       Bucket: this.s3FileBucket,
@@ -235,6 +249,17 @@ export default class FileStorage {
       new DeleteObjectCommand({
         Bucket: `${this.s3Url}${this.s3FileBucket}`,
         Key: name,
+      })
+    );
+  }
+
+  bulkDeleteFiles(files) {
+    return this.s3Files.send(
+      new DeleteObjectsCommand({
+        Bucket: `${this.s3Url}${this.s3FileBucket}`,
+        Delete: {
+          Objects: files.map((file) => ({ Key: file })),
+        },
       })
     );
   }

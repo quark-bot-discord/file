@@ -1,5 +1,5 @@
 export default class FileStorage {
-    constructor({ s3Url, s3FileBucket, s3AccessKeyId, s3SecretAccessKey, s3Region, fileExpirationDaysStandard, fileExpirationDaysExtended, downloadIp }: {
+    constructor({ s3Url, s3FileBucket, s3AccessKeyId, s3SecretAccessKey, s3Region, fileExpirationDaysStandard, fileExpirationDaysExtended, downloadIp, }: {
         s3Url: any;
         s3FileBucket: any;
         s3AccessKeyId: any;
@@ -35,6 +35,7 @@ export default class FileStorage {
         name: string;
     }>;
     deleteFile(name: any): Promise<import("@aws-sdk/client-s3").DeleteObjectCommandOutput>;
+    bulkDeleteFiles(files: any): Promise<import("@aws-sdk/client-s3").DeleteObjectsCommandOutput>;
     checkFileExists(attachment_id: any, channel_id: any, guild_id: any, quark_premium: any, key?: any): Promise<boolean>;
 }
 import checkMaxAttachmentSize from "./src/checkMaxAttachmentSize.js";
