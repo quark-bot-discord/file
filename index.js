@@ -19,7 +19,7 @@ import sortFiles from "./src/sortFiles.js";
 const sleep = (period) =>
   new Promise((resolve, reject) => setTimeout(resolve, period));
 
-export { checkMaxAttachmentSize, sortFiles, NoSuchKey };
+export { checkMaxAttachmentSize, sortFiles, NoSuchKey, _fetchFile, _downloadFile };
 
 export default class FileStorage {
   constructor({
