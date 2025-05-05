@@ -35,6 +35,7 @@ export default class FileStorage {
         size: number;
         name: string;
     }>;
+    fetchFileRaw(bucket: any, key: any): Promise<import("@aws-sdk/client-s3").GetObjectCommandOutput>;
     deleteFile(name: any): Promise<import("@aws-sdk/client-s3").DeleteObjectCommandOutput>;
     bulkDeleteFiles(files: any): Promise<import("@aws-sdk/client-s3").DeleteObjectsCommandOutput>;
     checkFileExists(attachment_id: any, channel_id: any, guild_id: any, quark_premium: any, key?: any, extendedExpiration?: boolean): Promise<boolean>;

@@ -236,13 +236,26 @@ export default class FileStorage {
       file_size
     );
 
+    const raw = await this.fetchFileRaw(
+      `${this.s3Url}${this.s3FileBucket}`,
+      fileName
+    );
+
+    return {
+      stream: _fetchFile(raw.Body, encryptionKey, encryptionIv),
+      size: raw.ContentLength,
+      name: fileName,
+    };
+  }
+
+  async fetchFileRaw(bucket, key) {
     let raw;
 
     try {
       raw = await this.s3Files.send(
         new GetObjectCommand({
-          Bucket: `${this.s3Url}${this.s3FileBucket}`,
-          Key: fileName,
+          Bucket: bucket,
+          Key: key,
         })
       );
     } catch (error) {
@@ -250,20 +263,14 @@ export default class FileStorage {
         await sleep(10000);
         raw = await this.s3Files.send(
           new GetObjectCommand({
-            Bucket: `${this.s3Url}${this.s3FileBucket}`,
-            Key: fileName,
+            Bucket: bucket,
+            Key: key,
           })
         );
       } else throw error;
-
-      return null;
     }
 
-    return {
-      stream: _fetchFile(raw.Body, encryptionKey, encryptionIv),
-      size: raw.ContentLength,
-      name: fileName,
-    };
+    return raw;
   }
 
   deleteFile(name) {
