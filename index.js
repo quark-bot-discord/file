@@ -15,11 +15,22 @@ import _downloadFile from "./src/downloadFile.js";
 import _fetchFile from "./src/fetchFile.js";
 import checkMaxAttachmentSize from "./src/checkMaxAttachmentSize.js";
 import sortFiles from "./src/sortFiles.js";
+import https from "https";
+import { NodeHttpHandler } from "@smithy/node-http-handler";
+const httpsAgent = new https.Agent({
+  maxSockets: 512,
+});
 
 const sleep = (period) =>
   new Promise((resolve, reject) => setTimeout(resolve, period));
 
-export { checkMaxAttachmentSize, sortFiles, NoSuchKey, _fetchFile, _downloadFile };
+export {
+  checkMaxAttachmentSize,
+  sortFiles,
+  NoSuchKey,
+  _fetchFile,
+  _downloadFile,
+};
 
 export default class FileStorage {
   constructor({
@@ -43,6 +54,10 @@ export default class FileStorage {
       },
       bucketEndpoint: true,
       region: s3Region,
+      requestHandler: new NodeHttpHandler({
+        requestTimeout: 30000,
+        httpsAgent,
+      }),
     });
 
     this.s3Url = s3Url;
