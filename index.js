@@ -256,8 +256,19 @@ export default class FileStorage {
       fileName
     );
 
+    const fileLastModified = raw.LastModified;
+
+    const decompressionFormat = checkCompressionFormat(
+      (fileLastModified.getTime() / 1000) | 0
+    );
+
     return {
-      stream: _fetchFile(raw.Body, encryptionKey, encryptionIv),
+      stream: await _fetchFile(
+        raw.Body,
+        encryptionKey,
+        encryptionIv,
+        decompressionFormat
+      ),
       size: raw.ContentLength,
       name: fileName,
     };
