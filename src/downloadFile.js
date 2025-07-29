@@ -2,7 +2,7 @@ import fetch from "node-fetch";
 import { constants, createGzip, createZstdCompress } from "zlib";
 import { createCipheriv } from "crypto";
 import https from "https";
-import { checkCompressionFormat } from "./checkCompressionFormat";
+import { checkCompressionFormat } from "./checkCompressionFormat.js";
 
 /**
  * Downloads a file from a URL and decrypts it
