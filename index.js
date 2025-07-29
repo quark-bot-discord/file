@@ -17,6 +17,7 @@ import checkMaxAttachmentSize from "./src/checkMaxAttachmentSize.js";
 import sortFiles from "./src/sortFiles.js";
 import https from "https";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
+import { checkCompressionFormat } from "./src/checkCompressionFormat.js";
 const httpsAgent = new https.Agent({
   maxSockets: 512,
 });
