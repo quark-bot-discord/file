@@ -1,5 +1,5 @@
 import { createDecipheriv } from "crypto";
-import { createGunzip, createZstdDecompress } from "zlib";
+import { createZstdDecompress } from "zlib";
 
 /**
  * Fetches a file from a stream and decrypts it
@@ -8,10 +8,8 @@ import { createGunzip, createZstdDecompress } from "zlib";
  * @param {String} iv IV to decrypt the file with
  * @returns {Stream}
  */
-export default function fetchFile(stream, key, iv, compressionFormat = "zstd") {
+export default function fetchFile(stream, key, iv) {
   return stream
     .pipe(createDecipheriv("aes-256-cbc", key, iv))
-    .pipe(
-      compressionFormat === "zstd" ? createZstdDecompress() : createGunzip()
-    );
+    .pipe(createZstdDecompress());
 }

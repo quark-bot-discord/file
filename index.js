@@ -17,7 +17,6 @@ import checkMaxAttachmentSize from "./src/checkMaxAttachmentSize.js";
 import sortFiles from "./src/sortFiles.js";
 import https from "https";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
-import { checkCompressionFormat } from "./src/checkCompressionFormat.js";
 const httpsAgent = new https.Agent({
   maxSockets: 512,
 });
@@ -257,18 +256,11 @@ export default class FileStorage {
       fileName
     );
 
-    const fileLastModified = raw.LastModified;
-
-    const decompressionFormat = checkCompressionFormat(
-      (fileLastModified.getTime() / 1000) | 0
-    );
-
     return {
       stream: await _fetchFile(
         raw.Body,
         encryptionKey,
         encryptionIv,
-        decompressionFormat
       ),
       size: raw.ContentLength,
       name: fileName,

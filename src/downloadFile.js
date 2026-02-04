@@ -1,8 +1,7 @@
 import fetch from "node-fetch";
-import { constants, createGzip, createZstdCompress } from "zlib";
+import { constants, createZstdCompress } from "zlib";
 import { createCipheriv } from "crypto";
 import https from "https";
-import { checkCompressionFormat } from "./checkCompressionFormat.js";
 
 /**
  * Downloads a file from a URL and decrypts it
@@ -28,22 +27,16 @@ export default async function downloadFile(url, key, iv, ip) {
       throw new Error("Response body is null");
     }
 
-    const compressionFormat = checkCompressionFormat(
-      (new Date().getTime() / 1000) | 0
-    );
-
     const stream = res.body
       .on("error", (error) => {
         throw error;
       })
       .pipe(
-        compressionFormat === "zstd"
-          ? createZstdCompress({
-              params: {
-                [constants.ZSTD_c_compressionLevel]: 10,
-              },
-            })
-          : createGzip()
+        createZstdCompress({
+          params: {
+            [constants.ZSTD_c_compressionLevel]: 10,
+          },
+        }),
       )
       .on("error", (error) => {
         throw error;

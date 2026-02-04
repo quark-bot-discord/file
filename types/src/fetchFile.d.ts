@@ -5,4 +5,4 @@
  * @param {String} iv IV to decrypt the file with
  * @returns {Stream}
  */
-export default function fetchFile(stream: Stream, key: string, iv: string, compressionFormat: "gzip" | "zstd"): Stream;
+export default function fetchFile(stream: Stream, key: string, iv: string): Stream;
