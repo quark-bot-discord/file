@@ -1,15 +1,66 @@
 import { createDecipheriv } from "crypto";
-import { createZstdDecompress } from "zlib";
+import { createZstdDecompress, createBrotliDecompress } from "zlib";
+import { Transform } from "stream";
 
 /**
- * Fetches a file from a stream and decrypts it
+ * Fetches a file from a stream, decrypts it, and decompresses it
+ * Reads the first byte to determine compression type:
+ * 0x01 = Brotli, 0x00 (or unknown) = Zstd fallback
  * @param {Stream} stream Stream to fetch the file from
  * @param {String} key Key to decrypt the file with
  * @param {String} iv IV to decrypt the file with
  * @returns {Stream}
  */
 export default function fetchFile(stream, key, iv) {
-  return stream
-    .pipe(createDecipheriv("aes-256-cbc", key, iv))
-    .pipe(createZstdDecompress());
+  const decrypted = stream.pipe(createDecipheriv("aes-256-cbc", key, iv));
+
+  // Transform stream to read indicator byte and decompress with appropriate algorithm
+  const decompressWithFallback = new Transform({
+    transform(chunk, encoding, callback) {
+      if (!this.decompressor) {
+        // Read first byte to determine compression type
+        if (chunk.length === 0) {
+          callback();
+          return;
+        }
+
+        const indicator = chunk[0];
+        const dataWithoutIndicator = chunk.slice(1);
+
+        // Select decompressor based on indicator byte
+        if (indicator === 0x01) {
+          this.decompressor = createBrotliDecompress();
+        } else {
+          // Fallback to Zstd for 0x00 or unknown indicators
+          this.decompressor = createZstdDecompress();
+        }
+
+        this.decompressor.on("data", (data) => {
+          this.push(data);
+        });
+
+        this.decompressor.on("error", (error) => {
+          this.destroy(error);
+        });
+
+        // Write the data without the indicator byte
+        if (dataWithoutIndicator.length > 0) {
+          this.decompressor.write(dataWithoutIndicator);
+        }
+      } else {
+        this.decompressor.write(chunk);
+      }
+      callback();
+    },
+
+    flush(callback) {
+      if (this.decompressor) {
+        this.decompressor.end(callback);
+      } else {
+        callback();
+      }
+    },
+  });
+
+  return decrypted.pipe(decompressWithFallback);
 }

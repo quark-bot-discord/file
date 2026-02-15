@@ -1,13 +1,16 @@
 import fetch from "node-fetch";
-import { constants, createZstdCompress } from "zlib";
+import { constants, createBrotliCompress } from "zlib";
 import { createCipheriv } from "crypto";
 import https from "https";
+import { Transform } from "stream";
 
 /**
- * Downloads a file from a URL and decrypts it
+ * Downloads a file from a URL, compresses it with Brotli, and encrypts it
+ * Prepends a single byte (0x01) to indicate Brotli compression
  * @param {String} url URL to download the file from
- * @param {String} key Key to decrypt the file with
- * @param {String} iv IV to decrypt the file with
+ * @param {String} key Key to encrypt the file with
+ * @param {String} iv IV to encrypt the file with
+ * @param {String} ip IP address to bind to (optional)
  * @returns {Promise<ReadableStream>}
  */
 export default async function downloadFile(url, key, iv, ip) {
@@ -15,10 +18,10 @@ export default async function downloadFile(url, key, iv, ip) {
     throw new Error("Invalid parameters: url, key, and iv are required");
   }
 
-  const agent = new https.Agent({ localAddress: ip });
+  const agent = ip ? new https.Agent({ localAddress: ip }) : undefined;
 
   try {
-    const res = await fetch(url, { agent });
+    const res = await fetch(url, agent ? { agent } : {});
     if (!res.ok) {
       throw new Error(`Error when downloading file, got status ${res.status}`);
     }
@@ -27,17 +30,38 @@ export default async function downloadFile(url, key, iv, ip) {
       throw new Error("Response body is null");
     }
 
+    // Transform stream to prepend Brotli indicator byte (0x01)
+    const prependIndicator = new Transform({
+      transform(chunk, encoding, callback) {
+        if (!this.headerWritten) {
+          this.push(Buffer.from([0x01])); // 0x01 = Brotli compression
+          this.headerWritten = true;
+        }
+        this.push(chunk);
+        callback();
+      },
+    });
+
     const stream = res.body
       .on("error", (error) => {
         throw error;
       })
       .pipe(
-        createZstdCompress({
+        createBrotliCompress({
           params: {
-            [constants.ZSTD_c_compressionLevel]: 10,
+            [constants.BROTLI_PARAM_QUALITY]: constants.BROTLI_MAX_QUALITY,
+            [constants.BROTLI_PARAM_SIZE_HINT]: res.headers.get(
+              "content-length",
+            )
+              ? Number(res.headers.get("content-length"))
+              : undefined,
           },
         }),
       )
+      .on("error", (error) => {
+        throw error;
+      })
+      .pipe(prependIndicator)
       .on("error", (error) => {
         throw error;
       })
