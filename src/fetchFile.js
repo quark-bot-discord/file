@@ -28,11 +28,14 @@ export default function fetchFile(stream, key, iv) {
         const dataWithoutIndicator = chunk.slice(1);
 
         // Select decompressor based on indicator byte
+        let dataToWrite;
         if (indicator === 0x01) {
           this.decompressor = createBrotliDecompress();
+          dataToWrite = dataWithoutIndicator;
         } else {
           // Fallback to Zstd for 0x00 or unknown indicators
           this.decompressor = createZstdDecompress();
+          dataToWrite = chunk; // Use data with the indicator for Zstd
         }
 
         this.decompressor.on("data", (data) => {
@@ -43,9 +46,9 @@ export default function fetchFile(stream, key, iv) {
           this.destroy(error);
         });
 
-        // Write the data without the indicator byte
-        if (dataWithoutIndicator.length > 0) {
-          this.decompressor.write(dataWithoutIndicator);
+        // Write the data
+        if (dataToWrite.length > 0) {
+          this.decompressor.write(dataToWrite);
         }
       } else {
         this.decompressor.write(chunk);
