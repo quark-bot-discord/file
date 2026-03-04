@@ -1,6 +1,6 @@
 import { createDecipheriv } from "crypto";
 import { createZstdDecompress, createBrotliDecompress } from "zlib";
-import { Transform } from "stream";
+import { Transform, PassThrough } from "stream";
 
 /**
  * Fetches a file from a stream, decrypts it, and decompresses it
@@ -37,7 +37,7 @@ export function fetchFile(stream: NodeJS.ReadableStream, key: string, iv: string
         } else if (indicator === 0x00) {
           // no compression
           // @ts-ignore
-          this.decompressor = new (require("stream").PassThrough)();
+          this.decompressor = new PassThrough();
           dataToWrite = dataWithoutIndicator;
         } else {
           // Fallback to Zstd for unknown indicators

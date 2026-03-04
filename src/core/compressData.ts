@@ -1,4 +1,5 @@
 import { createBrotliCompress, constants, BrotliCompress } from "node:zlib";
+import { PassThrough } from "stream";
 
 export type CompressionMode = "brotli" | "none";
 
@@ -17,7 +18,7 @@ export function compressData(mode: CompressionMode, size?: number) {
         case "brotli":
             return brotliCompress(size);
         case "none":
-            return new (require("stream").PassThrough)();
+            return new PassThrough();
         default:
             throw new Error(`Unknown compression mode: ${mode}`);
     }
