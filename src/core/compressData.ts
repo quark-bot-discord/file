@@ -5,7 +5,7 @@ export type CompressionMode = "brotli" | "none";
 
 function brotliCompress(size?: number): BrotliCompress {
     const params: { [key: number]: number | boolean } = {
-        [constants.BROTLI_PARAM_QUALITY]: constants.BROTLI_MAX_QUALITY,
+        [constants.BROTLI_PARAM_QUALITY]: constants.BROTLI_MIN_QUALITY,
     };
     if (size !== undefined) {
         params[constants.BROTLI_PARAM_SIZE_HINT] = size;

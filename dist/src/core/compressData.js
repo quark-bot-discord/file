@@ -2,7 +2,7 @@ import { createBrotliCompress, constants } from "node:zlib";
 import { PassThrough } from "stream";
 function brotliCompress(size) {
     const params = {
-        [constants.BROTLI_PARAM_QUALITY]: constants.BROTLI_MAX_QUALITY,
+        [constants.BROTLI_PARAM_QUALITY]: constants.BROTLI_MIN_QUALITY,
     };
     if (size !== undefined) {
         params[constants.BROTLI_PARAM_SIZE_HINT] = size;
