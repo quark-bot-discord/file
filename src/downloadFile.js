@@ -3,6 +3,10 @@ import { constants, createBrotliCompress } from "zlib";
 import { createCipheriv } from "crypto";
 import https from "https";
 import { Transform } from "stream";
+import { getFileType } from "./getFileType";
+import { checkBestCompression } from "./checkBestCompression";
+import { getCompressionIndicator } from "./getCompressionIndicator";
+import { compressData } from "./compressData";
 
 /**
  * Downloads a file from a URL, compresses it with Brotli, and encrypts it
@@ -30,11 +34,13 @@ export default async function downloadFile(url, key, iv, ip) {
       throw new Error("Response body is null");
     }
 
-    // Transform stream to prepend Brotli indicator byte (0x01)
+    const mimeType = getFileType(url, res.headers.get("content-type"));
+    const compression = checkBestCompression(mimeType);
+
     const prependIndicator = new Transform({
       transform(chunk, encoding, callback) {
         if (!this.headerWritten) {
-          this.push(Buffer.from([0x01])); // 0x01 = Brotli compression
+          this.push(getCompressionIndicator(compression));
           this.headerWritten = true;
         }
         this.push(chunk);
@@ -47,16 +53,7 @@ export default async function downloadFile(url, key, iv, ip) {
         throw error;
       })
       .pipe(
-        createBrotliCompress({
-          params: {
-            [constants.BROTLI_PARAM_QUALITY]: constants.BROTLI_MAX_QUALITY,
-            [constants.BROTLI_PARAM_SIZE_HINT]: res.headers.get(
-              "content-length",
-            )
-              ? Number(res.headers.get("content-length"))
-              : undefined,
-          },
-        }),
+        compressData(compression, res.headers.get("content-length") ? Number(res.headers.get("content-length")) : undefined)
       )
       .on("error", (error) => {
         throw error;

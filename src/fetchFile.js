@@ -32,8 +32,12 @@ export default function fetchFile(stream, key, iv) {
         if (indicator === 0x01) {
           this.decompressor = createBrotliDecompress();
           dataToWrite = dataWithoutIndicator;
+        } else if (indicator === 0x00) {
+          // no compression
+          this.decompressor = new (require("stream").PassThrough)();
+          dataToWrite = dataWithoutIndicator;
         } else {
-          // Fallback to Zstd for 0x00 or unknown indicators
+          // Fallback to Zstd for unknown indicators
           this.decompressor = createZstdDecompress();
           dataToWrite = chunk; // Use data with the indicator for Zstd
         }
