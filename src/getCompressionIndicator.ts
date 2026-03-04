@@ -1,4 +1,4 @@
-import { CompressionMode } from "./compressData";
+import { CompressionMode } from "./compressData.js";
 
 export function getCompressionIndicator(compressionMode: CompressionMode): Uint8Array {
   switch (compressionMode) {

@@ -1,4 +1,4 @@
-import { CompressionMode } from "./compressData";
+import { CompressionMode } from "./compressData.js";
 
 export function checkBestCompression(mimeType: string): CompressionMode {
   if (!mimeType) return "brotli";

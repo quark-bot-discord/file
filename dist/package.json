@@ -1,0 +1,47 @@
+{
+    "name": "file",
+    "version": "1.0.1",
+    "description": "Downloads, compresses and encrypts files.",
+    "main": "index.js",
+    "type": "module",
+    "scripts": {
+        "test": "echo \"Error: no test specified\" && exit 1",
+        "typings": "npx -p typescript tsc index.js --declaration --allowJs --emitDeclarationOnly --outDir types && npx prettier --write types/index.d.ts",
+        "build": "tsc"
+    },
+    "exports": {
+        ".": {
+            "import": "./dist/src/index.js",
+            "require": "./dist/src/index.js",
+            "types": "./dist/src/index.d.ts"
+        }
+    },
+    "author": "Starman",
+    "license": "MIT",
+    "dependencies": {
+        "@aws-sdk/client-s3": "^3.651.1",
+        "@aws-sdk/lib-storage": "^3.651.1",
+        "@aws-sdk/middleware-bucket-endpoint": "^3.649.0",
+        "@smithy/node-http-handler": "^4.0.4",
+        "hash.js": "^1.1.7",
+        "node-fetch": "^3.3.2"
+    },
+    "devDependencies": {
+        "@eslint/js": "^9.21.0",
+        "@types/mocha": "^10.0.10",
+        "@types/node": "^22.13.5",
+        "chai": "^5.2.0",
+        "eslint": "^9.21.0",
+        "eslint-config-prettier": "^10.1.2",
+        "eslint-plugin-mocha": "^10.5.0",
+        "esmock": "^2.7.0",
+        "globals": "^16.0.0",
+        "husky": "^9.1.7",
+        "lint-staged": "^15.4.3",
+        "mocha": "^11.1.0",
+        "prettier": "3.5.2",
+        "sinon": "^19.0.2",
+        "typescript": "^5.7.3",
+        "typescript-eslint": "^8.24.1"
+    }
+}

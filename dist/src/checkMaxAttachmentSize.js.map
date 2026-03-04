@@ -1,0 +1,1 @@
+{"version":3,"file":"checkMaxAttachmentSize.js","sourceRoot":"","sources":["../../src/checkMaxAttachmentSize.js"],"names":[],"mappings":"AAAA,MAAM,CAAC,OAAO,UAAU,sBAAsB,CAAC,YAAY;IACzD,QAAQ,YAAY,EAAE,CAAC;QACrB,KAAK,CAAC;YACJ,OAAO,QAAQ,CAAC;QAClB,KAAK,CAAC;YACJ,OAAO,SAAS,CAAC;QACnB;YACE,OAAO,QAAQ,CAAC;IACpB,CAAC;AACH,CAAC"}
