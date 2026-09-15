@@ -74,6 +74,12 @@ export function fetchFile(stream, key, iv) {
             }
         },
     });
+    // Errors do not cross `pipe()`. A decrypt failure (bad key, truncated
+    // ciphertext) on the upstream stage would otherwise be an unhandled error
+    // on a stream nobody holds a reference to; route it into the stream the
+    // caller actually gets.
+    stream.on("error", (error) => decompressWithFallback.destroy(error));
+    decrypted.on("error", (error) => decompressWithFallback.destroy(error));
     return decrypted.pipe(decompressWithFallback);
 }
 //# sourceMappingURL=fetchFile.js.map

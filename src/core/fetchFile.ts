@@ -11,7 +11,11 @@ import { Transform, PassThrough } from "stream";
  * @param {String} iv IV to decrypt the file with
  * @returns {Stream}
  */
-export function fetchFile(stream: NodeJS.ReadableStream, key: string, iv: string): NodeJS.ReadableStream {
+export function fetchFile(
+  stream: NodeJS.ReadableStream,
+  key: string,
+  iv: string,
+): NodeJS.ReadableStream {
   const decrypted = stream.pipe(createDecipheriv("aes-256-cbc", key, iv));
 
   // Transform stream to read indicator byte and decompress with appropriate algorithm
@@ -79,5 +83,13 @@ export function fetchFile(stream: NodeJS.ReadableStream, key: string, iv: string
     },
   });
 
+  // Errors do not cross `pipe()`. A decrypt failure (bad key, truncated
+  // ciphertext) on the upstream stage would otherwise be an unhandled error
+  // on a stream nobody holds a reference to; route it into the stream the
+  // caller actually gets.
+  stream.on("error", (error: Error) => decompressWithFallback.destroy(error));
+  decrypted.on("error", (error: Error) =>
+    decompressWithFallback.destroy(error),
+  );
   return decrypted.pipe(decompressWithFallback);
 }

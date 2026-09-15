@@ -12,6 +12,30 @@ import { NodeHttpHandler } from "@smithy/node-http-handler";
 const httpsAgent = new https.Agent({
     maxSockets: 512,
 });
+/**
+ * Resolve once the stream has produced its first chunk (or ended empty);
+ * reject if it errors first. Nothing is consumed — `readable` only says data
+ * is buffered — so the caller can pipe it afterwards as before.
+ */
+function primeStream(stream) {
+    return new Promise((resolve, reject) => {
+        const done = (err) => {
+            stream.removeListener("readable", onReadable);
+            stream.removeListener("end", onEnd);
+            stream.removeListener("error", onError);
+            if (err)
+                reject(err);
+            else
+                resolve();
+        };
+        const onReadable = () => done();
+        const onEnd = () => done();
+        const onError = (err) => done(err);
+        stream.once("readable", onReadable);
+        stream.once("end", onEnd);
+        stream.once("error", onError);
+    });
+}
 const sleep = (period) => new Promise((resolve, reject) => setTimeout(resolve, period));
 export { checkMaxAttachmentSize, sortFiles, NoSuchKey, _fetchFile, _downloadFile, };
 export default class FileStorage {
@@ -137,10 +161,26 @@ export default class FileStorage {
         if (!raw.Body) {
             throw new Error("File body is null");
         }
+        const stream = _fetchFile(
+        // @ts-ignore this works
+        raw.Body, encryptionKey, encryptionIv);
+        /**
+         * Fail HERE, inside the caller's try/catch, rather than later.
+         *
+         * The decompressor only sees the first bytes when something starts
+         * reading the stream — which in serverlog is the multipart body of the
+         * webhook POST, long after `fetchFile` has returned. A stored object that
+         * is not valid Brotli/zstd (`Unknown frame descriptor`, ~130/h on main)
+         * therefore surfaced as an unhandled `error` event on a stream nobody was
+         * listening to: an uncaught exception at process level and a failed send,
+         * instead of a log sent without its attachment. Waiting for the first
+         * readable chunk (or the error) before returning turns it back into an
+         * ordinary rejection the existing `catch` around every call already
+         * handles.
+         */
+        await primeStream(stream);
         return {
-            stream: await _fetchFile(
-            // @ts-ignore this works
-            raw.Body, encryptionKey, encryptionIv),
+            stream,
             size: raw.ContentLength,
             name: fileName,
         };

@@ -21,6 +21,29 @@ const httpsAgent = new https.Agent({
   maxSockets: 512,
 });
 
+/**
+ * Resolve once the stream has produced its first chunk (or ended empty);
+ * reject if it errors first. Nothing is consumed — `readable` only says data
+ * is buffered — so the caller can pipe it afterwards as before.
+ */
+function primeStream(stream: NodeJS.ReadableStream): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const done = (err?: Error) => {
+      stream.removeListener("readable", onReadable);
+      stream.removeListener("end", onEnd);
+      stream.removeListener("error", onError);
+      if (err) reject(err);
+      else resolve();
+    };
+    const onReadable = () => done();
+    const onEnd = () => done();
+    const onError = (err: Error) => done(err);
+    stream.once("readable", onReadable);
+    stream.once("end", onEnd);
+    stream.once("error", onError);
+  });
+}
+
 const sleep = (period: number) =>
   new Promise((resolve, reject) => setTimeout(resolve, period));
 
@@ -121,7 +144,7 @@ export default class FileStorage {
             },
           ],
         },
-      })
+      }),
     );
   }
 
@@ -152,17 +175,22 @@ export default class FileStorage {
     return sortFiles(files, maxSize);
   }
 
-  getEncryptionKeys(guild_id: string, channel_id: string, attachment_id: string, file_size: number) {
+  getEncryptionKeys(
+    guild_id: string,
+    channel_id: string,
+    attachment_id: string,
+    file_size: number,
+  ) {
     return {
       key: sha512()
         .update(
           `${sha512()
             .update(
               `${String(guild_id)}${String(channel_id)}${String(
-                attachment_id
-              )}${String(file_size)}`
+                attachment_id,
+              )}${String(file_size)}`,
             )
-            .digest("hex")}satoshiNakamoto`
+            .digest("hex")}satoshiNakamoto`,
         )
         .digest("hex")
         .slice(0, 32),
@@ -170,9 +198,9 @@ export default class FileStorage {
         .update(
           `${sha512()
             .update(
-              `${String(guild_id)}${String(channel_id)}${String(attachment_id)}`
+              `${String(guild_id)}${String(channel_id)}${String(attachment_id)}`,
             )
-            .digest("hex")}${String(file_size)}`
+            .digest("hex")}${String(file_size)}`,
         )
         .digest("hex")
         .slice(0, 16),
@@ -185,7 +213,7 @@ export default class FileStorage {
     guild_id: string,
     quark_premium: boolean,
     key = null,
-    extendedExpiration = false
+    extendedExpiration = false,
   ) {
     const stringToHash = `${attachment_id}/${channel_id}/${guild_id}`;
 
@@ -203,7 +231,7 @@ export default class FileStorage {
     file_size: number,
     quark_premium: boolean,
     key = null,
-    extendedExpiration = false
+    extendedExpiration = false,
   ) {
     const maxFileSize = this.checkMaxAttachmentSize(premium_tier);
 
@@ -215,21 +243,21 @@ export default class FileStorage {
       guild_id,
       quark_premium,
       key,
-      extendedExpiration
+      extendedExpiration,
     );
 
     const { key: encryptionKey, iv: encryptionIv } = this.getEncryptionKeys(
       guild_id,
       channel_id,
       attachment_id,
-      file_size
+      file_size,
     );
 
     const stream = await _downloadFile(
       url,
       encryptionKey,
       encryptionIv,
-      this.downloadIp
+      this.downloadIp,
     );
 
     const { writeStream, promise } = this.uploadStream({
@@ -249,7 +277,7 @@ export default class FileStorage {
     file_size: number,
     quark_premium: boolean,
     key = null,
-    extendedExpiration = false
+    extendedExpiration = false,
   ) {
     const fileName = this.getFileName(
       attachment_id,
@@ -257,32 +285,50 @@ export default class FileStorage {
       guild_id,
       quark_premium,
       key,
-      extendedExpiration
+      extendedExpiration,
     );
 
     const { key: encryptionKey, iv: encryptionIv } = this.getEncryptionKeys(
       guild_id,
       channel_id,
       attachment_id,
-      file_size
+      file_size,
     );
 
     const raw = await this.fetchFileRaw(
       `${this.s3Url}${this.s3FileBucket}`,
-      fileName
+      fileName,
     );
 
     if (!raw.Body) {
       throw new Error("File body is null");
     }
 
+    const stream = _fetchFile(
+      // @ts-ignore this works
+      raw.Body,
+      encryptionKey,
+      encryptionIv,
+    );
+
+    /**
+     * Fail HERE, inside the caller's try/catch, rather than later.
+     *
+     * The decompressor only sees the first bytes when something starts
+     * reading the stream — which in serverlog is the multipart body of the
+     * webhook POST, long after `fetchFile` has returned. A stored object that
+     * is not valid Brotli/zstd (`Unknown frame descriptor`, ~130/h on main)
+     * therefore surfaced as an unhandled `error` event on a stream nobody was
+     * listening to: an uncaught exception at process level and a failed send,
+     * instead of a log sent without its attachment. Waiting for the first
+     * readable chunk (or the error) before returning turns it back into an
+     * ordinary rejection the existing `catch` around every call already
+     * handles.
+     */
+    await primeStream(stream);
+
     return {
-      stream: await _fetchFile(
-        // @ts-ignore this works
-        raw.Body,
-        encryptionKey,
-        encryptionIv,
-      ),
+      stream,
       size: raw.ContentLength,
       name: fileName,
     };
@@ -296,7 +342,7 @@ export default class FileStorage {
         new GetObjectCommand({
           Bucket: bucket,
           Key: key,
-        })
+        }),
       );
     } catch (error: unknown) {
       // @ts-ignore this works
@@ -306,7 +352,7 @@ export default class FileStorage {
           new GetObjectCommand({
             Bucket: bucket,
             Key: key,
-          })
+          }),
         );
       } else throw error;
     }
@@ -319,7 +365,7 @@ export default class FileStorage {
       new DeleteObjectCommand({
         Bucket: `${this.s3Url}${this.s3FileBucket}`,
         Key: name,
-      })
+      }),
     );
   }
 
@@ -330,7 +376,7 @@ export default class FileStorage {
         Delete: {
           Objects: files.map((file) => ({ Key: file })),
         },
-      })
+      }),
     );
   }
 
@@ -340,7 +386,7 @@ export default class FileStorage {
     guild_id: string,
     quark_premium: boolean,
     key = null,
-    extendedExpiration = false
+    extendedExpiration = false,
   ) {
     const fileName = this.getFileName(
       attachment_id,
@@ -348,7 +394,7 @@ export default class FileStorage {
       guild_id,
       quark_premium,
       key,
-      extendedExpiration
+      extendedExpiration,
     );
 
     try {
@@ -356,7 +402,7 @@ export default class FileStorage {
         new HeadObjectCommand({
           Bucket: `${this.s3Url}${this.s3FileBucket}`,
           Key: fileName,
-        })
+        }),
       );
 
       return true;
