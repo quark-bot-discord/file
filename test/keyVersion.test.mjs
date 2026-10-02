@@ -60,8 +60,10 @@ function storage(store, encryptionSecret) {
   fs.fetchFileRaw = async (_bucket, Key) => {
     const object = store.get(Key);
     if (!object) throw new Error("NoSuchKey");
+    const Body = Readable.from([object.body]);
+    fs.lastBody = Body;
     return {
-      Body: Readable.from([object.body]),
+      Body,
       ContentLength: object.body.length,
       Metadata: object.Metadata,
     };
@@ -114,7 +116,13 @@ test("secret holder still reads a version 1 object", async () => {
 test("version 2 object without the secret is refused, not garbled", async () => {
   const store = new Map();
   await save(storage(store, "secret-a"));
-  await assert.rejects(load(storage(store)), /FILE_ENCRYPTION_SECRET/);
+  const reader = storage(store);
+  await assert.rejects(load(reader), /FILE_ENCRYPTION_SECRET/);
+  assert.equal(
+    reader.lastBody.destroyed,
+    true,
+    "response body must be released",
+  );
 });
 
 test("version 2 object with the wrong secret does not yield the file", async () => {

@@ -197,7 +197,18 @@ export default class FileStorage {
         }
         // The object says which derivation it was written with, so files stored
         // before the secret was set stay readable until they expire.
-        const { key: encryptionKey, iv: encryptionIv } = this.getEncryptionKeys(guild_id, channel_id, attachment_id, file_size, raw.Metadata?.[KEY_VERSION_METADATA] === "2" ? 2 : 1);
+        let encryptionKey;
+        let encryptionIv;
+        try {
+            ({ key: encryptionKey, iv: encryptionIv } = this.getEncryptionKeys(guild_id, channel_id, attachment_id, file_size, raw.Metadata?.[KEY_VERSION_METADATA] === "2" ? 2 : 1));
+        }
+        catch (error) {
+            // The response body is already open. Left unread it would hold its
+            // connection in the shared pool until the socket timed out.
+            // @ts-ignore the Node body is a Readable
+            raw.Body.destroy?.();
+            throw error;
+        }
         const stream = _fetchFile(
         // @ts-ignore this works
         raw.Body, encryptionKey, encryptionIv);
