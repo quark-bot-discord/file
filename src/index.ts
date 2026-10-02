@@ -1,5 +1,6 @@
 import hashjs from "hash.js";
 const { sha512 } = hashjs;
+import { createHmac } from "crypto";
 import { PassThrough } from "stream";
 import { Upload } from "@aws-sdk/lib-storage";
 import {
@@ -55,8 +56,15 @@ export {
   _downloadFile,
 };
 
+/**
+ * S3 user-metadata key recording which key derivation an object was written
+ * with. Absent means 1.
+ */
+const KEY_VERSION_METADATA = "kv";
+
 export default class FileStorage {
   downloadIp?: string;
+  encryptionSecret?: string;
   s3Url: string;
   s3Region: string;
   s3FileBucket: string;
@@ -72,6 +80,7 @@ export default class FileStorage {
     fileExpirationDaysExtended,
     fileExpirationDaysUltraExtended,
     downloadIp,
+    encryptionSecret,
   }: {
     s3Url: string;
     s3FileBucket: string;
@@ -82,8 +91,17 @@ export default class FileStorage {
     fileExpirationDaysExtended?: number;
     fileExpirationDaysUltraExtended?: number;
     downloadIp?: string;
+    /**
+     * Secret mixed into the key for message attachments. Falls back to the
+     * FILE_ENCRYPTION_SECRET env var, so a consumer opts in by setting that
+     * and nothing else. Unset: behaviour is unchanged.
+     */
+    encryptionSecret?: string;
   }) {
     this.downloadIp = downloadIp;
+
+    this.encryptionSecret =
+      encryptionSecret || process.env.FILE_ENCRYPTION_SECRET || undefined;
 
     const s3Files = new S3Client({
       endpoint: s3Url,
@@ -148,7 +166,15 @@ export default class FileStorage {
     );
   }
 
-  uploadStream({ Bucket, Key }: { Bucket: string; Key: string }) {
+  uploadStream({
+    Bucket,
+    Key,
+    Metadata,
+  }: {
+    Bucket: string;
+    Key: string;
+    Metadata?: Record<string, string>;
+  }) {
     const pass = new PassThrough();
     return {
       writeStream: pass,
@@ -162,6 +188,7 @@ export default class FileStorage {
           Bucket,
           Key,
           Body: pass,
+          Metadata,
         },
       }).done(),
     };
@@ -175,12 +202,39 @@ export default class FileStorage {
     return sortFiles(files, maxSize);
   }
 
+  /**
+   * Version 1 derives the key from the ids, the size and a constant, all of
+   * which are known to anyone who could see the message, so it only protects
+   * against someone who has the stored objects and nothing else.
+   *
+   * Version 2 keys the derivation with `encryptionSecret`: the stored objects
+   * are unreadable without a secret that never sits in the bucket.
+   */
   getEncryptionKeys(
     guild_id: string,
     channel_id: string,
     attachment_id: string,
     file_size: number,
+    version: 1 | 2 = 1,
   ) {
+    if (version === 2) {
+      if (!this.encryptionSecret) {
+        throw new Error(
+          "File was encrypted with a secret this process does not have (FILE_ENCRYPTION_SECRET)",
+        );
+      }
+      const ids = `${String(guild_id)}:${String(channel_id)}:${String(
+        attachment_id,
+      )}:${String(file_size)}`;
+      const derive = (label: string) =>
+        createHmac("sha512", this.encryptionSecret as string)
+          .update(`${label}:${ids}`)
+          .digest("hex");
+      return {
+        key: derive("key").slice(0, 32),
+        iv: derive("iv").slice(0, 16),
+      };
+    }
     return {
       key: sha512()
         .update(
@@ -246,11 +300,17 @@ export default class FileStorage {
       extendedExpiration,
     );
 
+    // Keyed objects (assets) stay on version 1: asset-storage-node hands their
+    // keys to its readers by calling getEncryptionKeys itself, and that path
+    // does not read the version.
+    const keyVersion = this.encryptionSecret && key == null ? 2 : 1;
+
     const { key: encryptionKey, iv: encryptionIv } = this.getEncryptionKeys(
       guild_id,
       channel_id,
       attachment_id,
       file_size,
+      keyVersion,
     );
 
     const stream = await _downloadFile(
@@ -263,6 +323,7 @@ export default class FileStorage {
     const { writeStream, promise } = this.uploadStream({
       Bucket: this.s3FileBucket,
       Key: fileName,
+      Metadata: keyVersion === 2 ? { [KEY_VERSION_METADATA]: "2" } : undefined,
     });
 
     stream.pipe(writeStream);
@@ -288,13 +349,6 @@ export default class FileStorage {
       extendedExpiration,
     );
 
-    const { key: encryptionKey, iv: encryptionIv } = this.getEncryptionKeys(
-      guild_id,
-      channel_id,
-      attachment_id,
-      file_size,
-    );
-
     const raw = await this.fetchFileRaw(
       `${this.s3Url}${this.s3FileBucket}`,
       fileName,
@@ -303,6 +357,16 @@ export default class FileStorage {
     if (!raw.Body) {
       throw new Error("File body is null");
     }
+
+    // The object says which derivation it was written with, so files stored
+    // before the secret was set stay readable until they expire.
+    const { key: encryptionKey, iv: encryptionIv } = this.getEncryptionKeys(
+      guild_id,
+      channel_id,
+      attachment_id,
+      file_size,
+      raw.Metadata?.[KEY_VERSION_METADATA] === "2" ? 2 : 1,
+    );
 
     const stream = _fetchFile(
       // @ts-ignore this works

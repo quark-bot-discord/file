@@ -7,11 +7,12 @@ import { sortFiles } from "./util/sortFiles.js";
 export { checkMaxAttachmentSize, sortFiles, NoSuchKey, _fetchFile, _downloadFile, };
 export default class FileStorage {
     downloadIp?: string;
+    encryptionSecret?: string;
     s3Url: string;
     s3Region: string;
     s3FileBucket: string;
     s3Files: S3Client;
-    constructor({ s3Url, s3FileBucket, s3AccessKeyId, s3SecretAccessKey, s3Region, fileExpirationDaysStandard, fileExpirationDaysExtended, fileExpirationDaysUltraExtended, downloadIp, }: {
+    constructor({ s3Url, s3FileBucket, s3AccessKeyId, s3SecretAccessKey, s3Region, fileExpirationDaysStandard, fileExpirationDaysExtended, fileExpirationDaysUltraExtended, downloadIp, encryptionSecret, }: {
         s3Url: string;
         s3FileBucket: string;
         s3AccessKeyId: string;
@@ -21,17 +22,32 @@ export default class FileStorage {
         fileExpirationDaysExtended?: number;
         fileExpirationDaysUltraExtended?: number;
         downloadIp?: string;
+        /**
+         * Secret mixed into the key for message attachments. Falls back to the
+         * FILE_ENCRYPTION_SECRET env var, so a consumer opts in by setting that
+         * and nothing else. Unset: behaviour is unchanged.
+         */
+        encryptionSecret?: string;
     });
-    uploadStream({ Bucket, Key }: {
+    uploadStream({ Bucket, Key, Metadata, }: {
         Bucket: string;
         Key: string;
+        Metadata?: Record<string, string>;
     }): {
         writeStream: PassThrough;
         promise: Promise<import("@aws-sdk/client-s3").CompleteMultipartUploadCommandOutput>;
     };
     checkMaxAttachmentSize(premium_tier: number): number;
     sortFiles(files: any[], maxSize: number): any[][];
-    getEncryptionKeys(guild_id: string, channel_id: string, attachment_id: string, file_size: number): {
+    /**
+     * Version 1 derives the key from the ids, the size and a constant, all of
+     * which are known to anyone who could see the message, so it only protects
+     * against someone who has the stored objects and nothing else.
+     *
+     * Version 2 keys the derivation with `encryptionSecret`: the stored objects
+     * are unreadable without a secret that never sits in the bucket.
+     */
+    getEncryptionKeys(guild_id: string, channel_id: string, attachment_id: string, file_size: number, version?: 1 | 2): {
         key: string;
         iv: string;
     };
