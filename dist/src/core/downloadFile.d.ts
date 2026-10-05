@@ -5,6 +5,8 @@
  * @param {String} key Key to encrypt the file with
  * @param {String} iv IV to encrypt the file with
  * @param {String} ip IP address to bind to (optional)
+ * @param {Function} inspect Given the downloaded body before anything is done
+ * with it; returns the stream to store, or throws FileWithheld (optional)
  * @returns {Promise<ReadableStream>}
  */
-export declare function downloadFile(url: string, key: string, iv: string, ip?: string): Promise<NodeJS.ReadableStream>;
+export declare function downloadFile(url: string, key: string, iv: string, ip?: string, inspect?: (body: NodeJS.ReadableStream) => Promise<NodeJS.ReadableStream>): Promise<NodeJS.ReadableStream>;

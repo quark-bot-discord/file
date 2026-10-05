@@ -4,15 +4,19 @@ import { downloadFile as _downloadFile } from "./core/downloadFile.js";
 import { fetchFile as _fetchFile } from "./core/fetchFile.js";
 import { checkMaxAttachmentSize } from "./util/checkMaxAttachmentSize.js";
 import { sortFiles } from "./util/sortFiles.js";
-export { checkMaxAttachmentSize, sortFiles, NoSuchKey, _fetchFile, _downloadFile, };
+import { FileWithheld, Scanner } from "./scan/index.js";
+export { checkMaxAttachmentSize, sortFiles, NoSuchKey, _fetchFile, _downloadFile, FileWithheld, Scanner, };
+export { ArachnidShieldMatcher, scannerFromEnv } from "./scan/index.js";
+export type { Detection, Match, Matcher, ScanStage, Verdict, WithheldReason, } from "./scan/index.js";
 export default class FileStorage {
     downloadIp?: string;
     encryptionSecret?: string;
+    scanner?: Scanner;
     s3Url: string;
     s3Region: string;
     s3FileBucket: string;
     s3Files: S3Client;
-    constructor({ s3Url, s3FileBucket, s3AccessKeyId, s3SecretAccessKey, s3Region, fileExpirationDaysStandard, fileExpirationDaysExtended, fileExpirationDaysUltraExtended, downloadIp, encryptionSecret, }: {
+    constructor({ s3Url, s3FileBucket, s3AccessKeyId, s3SecretAccessKey, s3Region, fileExpirationDaysStandard, fileExpirationDaysExtended, fileExpirationDaysUltraExtended, downloadIp, encryptionSecret, scanner, }: {
         s3Url: string;
         s3FileBucket: string;
         s3AccessKeyId: string;
@@ -28,6 +32,14 @@ export default class FileStorage {
          * and nothing else. Unset: behaviour is unchanged.
          */
         encryptionSecret?: string;
+        /**
+         * Checks images against a database of known illegal material before they
+         * are stored and again before they are handed back. Falls back to one
+         * built from the environment (see scannerFromEnv). Neither: nothing is
+         * checked and behaviour is unchanged. Pass `null` to switch it off
+         * whatever the environment says.
+         */
+        scanner?: Scanner | null;
     });
     uploadStream({ Bucket, Key, Metadata, }: {
         Bucket: string;
@@ -52,12 +64,22 @@ export default class FileStorage {
         iv: string;
     };
     getFileName(attachment_id: string, channel_id: string, guild_id: string, quark_premium: boolean, key?: null, extendedExpiration?: boolean): string;
-    downloadFile(url: string, guild_id: string, channel_id: string, attachment_id: string, premium_tier: number, file_size: number, quark_premium: boolean, key?: null, extendedExpiration?: boolean): Promise<import("@aws-sdk/client-s3").CompleteMultipartUploadCommandOutput>;
-    fetchFile(guild_id: string, channel_id: string, attachment_id: string, file_size: number, quark_premium: boolean, key?: null, extendedExpiration?: boolean): Promise<{
+    downloadFile(url: string, guild_id: string, channel_id: string, attachment_id: string, premium_tier: number, file_size: number, quark_premium: boolean, key?: null, extendedExpiration?: boolean, 
+    /** Identifiers to include if the file is reported, e.g. message_id. */
+    context?: Record<string, string>): Promise<import("@aws-sdk/client-s3").CompleteMultipartUploadCommandOutput>;
+    fetchFile(guild_id: string, channel_id: string, attachment_id: string, file_size: number, quark_premium: boolean, key?: null, extendedExpiration?: boolean, 
+    /** Identifiers to include if the file is reported, e.g. message_id. */
+    context?: Record<string, string>): Promise<{
         stream: NodeJS.ReadableStream;
         size: number | undefined;
         name: string;
+    } | {
+        stream: import("stream").Readable;
+        size: number | undefined;
+        name: string;
     }>;
+    /** The reason on a marker object, or undefined if there is no marker. */
+    withheldMarker(fileName: string): Promise<string | undefined>;
     fetchFileRaw(bucket: string, key: string): Promise<import("@aws-sdk/client-s3").GetObjectCommandOutput>;
     deleteFile(name: string): Promise<import("@aws-sdk/client-s3").DeleteObjectCommandOutput>;
     bulkDeleteFiles(files: string[]): Promise<import("@aws-sdk/client-s3").DeleteObjectsCommandOutput>;

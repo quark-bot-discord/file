@@ -3,11 +3,12 @@ const { sha512 } = hashjs;
 import { createHmac } from "crypto";
 import { PassThrough } from "stream";
 import { Upload } from "@aws-sdk/lib-storage";
-import { PutBucketLifecycleConfigurationCommand, GetObjectCommand, DeleteObjectCommand, HeadObjectCommand, S3Client, NoSuchKey, DeleteObjectsCommand, } from "@aws-sdk/client-s3";
+import { PutBucketLifecycleConfigurationCommand, GetObjectCommand, DeleteObjectCommand, HeadObjectCommand, S3Client, NoSuchKey, DeleteObjectsCommand, PutObjectCommand, } from "@aws-sdk/client-s3";
 import { downloadFile as _downloadFile } from "./core/downloadFile.js";
 import { fetchFile as _fetchFile } from "./core/fetchFile.js";
 import { checkMaxAttachmentSize } from "./util/checkMaxAttachmentSize.js";
 import { sortFiles } from "./util/sortFiles.js";
+import { FileWithheld, Scanner, scannerFromEnv } from "./scan/index.js";
 import https from "https";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 const httpsAgent = new https.Agent({
@@ -38,15 +39,25 @@ function primeStream(stream) {
     });
 }
 const sleep = (period) => new Promise((resolve, reject) => setTimeout(resolve, period));
-export { checkMaxAttachmentSize, sortFiles, NoSuchKey, _fetchFile, _downloadFile, };
+export { checkMaxAttachmentSize, sortFiles, NoSuchKey, _fetchFile, _downloadFile, FileWithheld, Scanner, };
+export { ArachnidShieldMatcher, scannerFromEnv } from "./scan/index.js";
 /**
  * S3 user-metadata key recording which key derivation an object was written
  * with. Absent means 1.
  */
 const KEY_VERSION_METADATA = "kv";
+/**
+ * S3 user-metadata key on a marker object: an empty object stored in place of
+ * a file that matched at download, holding the reason, so the log written when
+ * the message is deleted can say why there is no file.
+ */
+const WITHHELD_METADATA = "withheld";
+/** S3 user-metadata key set to "clear" on a file that passed the check when stored. */
+const SCAN_METADATA = "scan";
 export default class FileStorage {
-    constructor({ s3Url, s3FileBucket, s3AccessKeyId, s3SecretAccessKey, s3Region, fileExpirationDaysStandard, fileExpirationDaysExtended, fileExpirationDaysUltraExtended, downloadIp, encryptionSecret, }) {
+    constructor({ s3Url, s3FileBucket, s3AccessKeyId, s3SecretAccessKey, s3Region, fileExpirationDaysStandard, fileExpirationDaysExtended, fileExpirationDaysUltraExtended, downloadIp, encryptionSecret, scanner, }) {
         this.downloadIp = downloadIp;
+        this.scanner = scanner === null ? undefined : (scanner ?? scannerFromEnv());
         this.encryptionSecret =
             encryptionSecret || process.env.FILE_ENCRYPTION_SECRET || undefined;
         const s3Files = new S3Client({
@@ -170,7 +181,9 @@ export default class FileStorage {
         const stringToHash = `${attachment_id}/${channel_id}/${guild_id}`;
         return `${extendedExpiration ? "2_" : ""}${key != null ? `${key}_` : ""}${quark_premium == true ? "1" : "0"}_${sha512().update(stringToHash).digest("hex")}.enc`;
     }
-    async downloadFile(url, guild_id, channel_id, attachment_id, premium_tier, file_size, quark_premium, key = null, extendedExpiration = false) {
+    async downloadFile(url, guild_id, channel_id, attachment_id, premium_tier, file_size, quark_premium, key = null, extendedExpiration = false, 
+    /** Identifiers to include if the file is reported, e.g. message_id. */
+    context) {
         const maxFileSize = this.checkMaxAttachmentSize(premium_tier);
         if (maxFileSize < file_size)
             throw new Error("File too big");
@@ -180,18 +193,101 @@ export default class FileStorage {
         // does not read the version.
         const keyVersion = this.encryptionSecret && key == null ? 2 : 1;
         const { key: encryptionKey, iv: encryptionIv } = this.getEncryptionKeys(guild_id, channel_id, attachment_id, file_size, keyVersion);
-        const stream = await _downloadFile(url, encryptionKey, encryptionIv, this.downloadIp);
+        const scanner = this.scanner;
+        // Set by the callback below; a property so the compiler does not assume
+        // it is still undefined afterwards.
+        const scan = {};
+        let stream;
+        try {
+            stream = await _downloadFile(url, encryptionKey, encryptionIv, this.downloadIp, scanner &&
+                (async (body) => {
+                    const scanned = await scanner.scanStream(body, file_size, "store");
+                    scan.verdict = scanned.verdict;
+                    if (scanned.verdict.status === "match") {
+                        scanned.stream.destroy();
+                        throw new FileWithheld(scanned.verdict.category, "store");
+                    }
+                    // An image that could not be checked this time must not replace
+                    // the marker left when an earlier download of it matched (a
+                    // message edit downloads every attachment again).
+                    if (scanned.verdict.status === "error" && key == null) {
+                        let marked;
+                        try {
+                            marked = await this.withheldMarker(fileName);
+                        }
+                        catch (error) {
+                            scanned.stream.destroy();
+                            throw error;
+                        }
+                        if (marked) {
+                            scanned.stream.destroy();
+                            throw new FileWithheld(marked, "store");
+                        }
+                    }
+                    return scanned.stream;
+                }));
+        }
+        catch (error) {
+            const verdict = scan.verdict;
+            if (scanner &&
+                error instanceof FileWithheld &&
+                verdict?.status === "match") {
+                // Nothing is stored. For a message attachment, leave a marker so the
+                // delete log can say why. Assets are read by other code that does not
+                // know about markers, so they simply stay absent.
+                if (key == null) {
+                    await this.s3Files
+                        .send(new PutObjectCommand({
+                        Bucket: `${this.s3Url}${this.s3FileBucket}`,
+                        Key: fileName,
+                        Body: "",
+                        Metadata: { [WITHHELD_METADATA]: verdict.category },
+                    }))
+                        .catch((markerError) => console.error(`[FILE SCAN] could not write marker ${fileName}: ${markerError.message}`));
+                }
+                scanner.report({
+                    time: new Date().toISOString(),
+                    stage: "store",
+                    provider: verdict.provider,
+                    category: verdict.category,
+                    match_type: verdict.matchType,
+                    pdq: verdict.hash,
+                    reference: verdict.reference,
+                    guild_id: String(guild_id),
+                    channel_id: String(channel_id),
+                    attachment_id: String(attachment_id),
+                    object: fileName,
+                    context,
+                });
+            }
+            throw error;
+        }
+        const metadata = {};
+        if (keyVersion === 2)
+            metadata[KEY_VERSION_METADATA] = "2";
+        if (scan.verdict?.status === "clear")
+            metadata[SCAN_METADATA] = "clear";
         const { writeStream, promise } = this.uploadStream({
             Bucket: this.s3FileBucket,
             Key: fileName,
-            Metadata: keyVersion === 2 ? { [KEY_VERSION_METADATA]: "2" } : undefined,
+            Metadata: Object.keys(metadata).length !== 0 ? metadata : undefined,
         });
         stream.pipe(writeStream);
         return promise;
     }
-    async fetchFile(guild_id, channel_id, attachment_id, file_size, quark_premium, key = null, extendedExpiration = false) {
+    async fetchFile(guild_id, channel_id, attachment_id, file_size, quark_premium, key = null, extendedExpiration = false, 
+    /** Identifiers to include if the file is reported, e.g. message_id. */
+    context) {
         const fileName = this.getFileName(attachment_id, channel_id, guild_id, quark_premium, key, extendedExpiration);
         const raw = await this.fetchFileRaw(`${this.s3Url}${this.s3FileBucket}`, fileName);
+        // A marker, not a file: it matched when it was downloaded and was never
+        // stored. Honoured even with no scanner configured.
+        const withheld = raw.Metadata?.[WITHHELD_METADATA];
+        if (withheld) {
+            // @ts-ignore the Node body is a Readable
+            raw.Body?.destroy?.();
+            throw new FileWithheld(withheld, "store");
+        }
         if (!raw.Body) {
             throw new Error("File body is null");
         }
@@ -226,12 +322,68 @@ export default class FileStorage {
          * ordinary rejection the existing `catch` around every call already
          * handles.
          */
-        await primeStream(stream);
+        if (!this.scanner) {
+            await primeStream(stream);
+            return {
+                stream,
+                size: raw.ContentLength,
+                name: fileName,
+            };
+        }
+        // Checked again here because the database of known material grows: a
+        // file that was clear when stored may match by the time it is re-uploaded.
+        // Reading the first bytes also does what primeStream does above.
+        const scanned = await this.scanner.scanStream(stream, file_size, "reupload");
+        const verdict = scanned.verdict;
+        if (verdict.status === "match") {
+            scanned.stream.destroy();
+            // @ts-ignore the Node body is a Readable
+            raw.Body.destroy?.();
+            this.scanner.report({
+                time: new Date().toISOString(),
+                stage: "reupload",
+                provider: verdict.provider,
+                category: verdict.category,
+                match_type: verdict.matchType,
+                pdq: verdict.hash,
+                reference: verdict.reference,
+                guild_id: String(guild_id),
+                channel_id: String(channel_id),
+                attachment_id: String(attachment_id),
+                object: fileName,
+                context,
+            });
+            throw new FileWithheld(verdict.category, "reupload");
+        }
+        if (verdict.status === "error" &&
+            this.scanner.failClosed &&
+            raw.Metadata?.[SCAN_METADATA] !== "clear") {
+            scanned.stream.destroy();
+            // @ts-ignore the Node body is a Readable
+            raw.Body.destroy?.();
+            throw new FileWithheld("unchecked", "reupload");
+        }
         return {
-            stream,
+            stream: scanned.stream,
             size: raw.ContentLength,
             name: fileName,
         };
+    }
+    /** The reason on a marker object, or undefined if there is no marker. */
+    async withheldMarker(fileName) {
+        try {
+            const head = await this.s3Files.send(new HeadObjectCommand({
+                Bucket: `${this.s3Url}${this.s3FileBucket}`,
+                Key: fileName,
+            }));
+            return head.Metadata?.[WITHHELD_METADATA];
+        }
+        catch (error) {
+            if (error?.name === "NotFound" ||
+                error?.$metadata?.httpStatusCode === 404)
+                return undefined;
+            throw error;
+        }
     }
     async fetchFileRaw(bucket, key) {
         let raw;
