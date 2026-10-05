@@ -1,16 +1,7 @@
-import { createRequire } from "module";
+import { Worker } from "worker_threads";
+import type { HashReply, HashRequest } from "./pdqWorker.js";
 
-interface Pdq {
-  init(): Promise<void>;
-  hash(image: {
-    data: Uint8Array;
-    width: number;
-    height: number;
-    channels: number;
-  }): { hash: Uint8Array; quality: number };
-}
-
-/** sharp or pdq-wasm could not be loaded: no image can be hashed at all. */
+/** sharp or the hash worker could not be loaded: no image can be hashed at all. */
 export class HasherUnavailable extends Error {}
 
 /** Decoding the image would take more memory than one check is allowed. */
@@ -22,12 +13,7 @@ export class TooManyPixels extends Error {}
  */
 async function load() {
   try {
-    const { default: sharp } = await import("sharp");
-    // pdq-wasm's ESM build cannot find its own .wasm file under Node; the
-    // CommonJS build can.
-    const { PDQ } = createRequire(import.meta.url)("pdq-wasm") as { PDQ: Pdq };
-    await PDQ.init();
-    return { sharp, PDQ };
+    return (await import("sharp")).default;
   } catch (error) {
     // Do not remember the failure: the next call tries again.
     loaded = undefined;
@@ -37,11 +23,71 @@ async function load() {
 
 let loaded: ReturnType<typeof load> | undefined;
 
+let worker: Worker | undefined;
+let nextId = 0;
+const pending = new Map<
+  number,
+  {
+    resolve: (result: { hash: Uint8Array; quality: number }) => void;
+    reject: (error: Error) => void;
+  }
+>();
+
+/** Hash raw pixels on the worker thread, starting it if needed. */
+function hashPixels(
+  pixels: Uint8Array,
+  width: number,
+  height: number,
+  channels: number,
+): Promise<{ hash: Uint8Array; quality: number }> {
+  if (!worker) {
+    const started = new Worker(new URL("./pdqWorker.js", import.meta.url));
+    const lost = (error: Error) => {
+      if (worker === started) worker = undefined;
+      for (const waiting of pending.values())
+        waiting.reject(new HasherUnavailable(error.message));
+      pending.clear();
+    };
+    started.on("message", (reply: HashReply) => {
+      const waiting = pending.get(reply.id);
+      if (!waiting) return;
+      pending.delete(reply.id);
+      // An idle worker should not keep the process alive.
+      if (pending.size === 0) started.unref();
+      if ("error" in reply) {
+        waiting.reject(
+          reply.unavailable
+            ? new HasherUnavailable(reply.error)
+            : new Error(reply.error),
+        );
+      } else waiting.resolve(reply);
+    });
+    started.on("error", lost);
+    started.on("exit", () => lost(new Error("hash worker exited")));
+    worker = started;
+  }
+  const id = nextId++;
+  // A copy the worker can take ownership of.
+  const copy = new Uint8Array(pixels);
+  const request: HashRequest = {
+    id,
+    pixels: copy.buffer,
+    width,
+    height,
+    channels,
+  };
+  return new Promise((resolve, reject) => {
+    pending.set(id, { resolve, reject });
+    (worker as Worker).ref();
+    (worker as Worker).postMessage(request, [copy.buffer]);
+  });
+}
+
 /**
  * Images up to this many pixels (1920x1080 and below) are hashed at full size,
  * which reproduces Meta's reference hash bit for bit. Larger ones are shrunk
- * to fit 1024x1024 first, which keeps hashing to a few milliseconds and moves
- * the hash by a few bits out of 256 (measured: at most 8 on Meta's test
+ * to fit 1024x1024 first, which bounds the time and memory one hash takes and
+ * moves the hash by a few bits out of 256 (measured: at most 8 on Meta's test
  * images, against a match threshold of 31).
  */
 const FULL_SIZE_PIXELS = 2_100_000;
@@ -79,7 +125,7 @@ export interface PdqResult {
  * if the image cannot be decoded.
  */
 export async function pdqHash(image: Buffer): Promise<PdqResult> {
-  const { sharp, PDQ } = await (loaded ??= load());
+  const sharp = await (loaded ??= load());
 
   const {
     width = 0,
@@ -114,12 +160,7 @@ export async function pdqHash(image: Buffer): Promise<PdqResult> {
     .raw()
     .toBuffer({ resolveWithObject: true });
 
-  const result = PDQ.hash({
-    data: new Uint8Array(data.buffer, data.byteOffset, data.length),
-    width: info.width,
-    height: info.height,
-    channels: info.channels,
-  });
+  const result = await hashPixels(data, info.width, info.height, info.channels);
 
   // pdq-wasm returns the sixteen 16-bit words least significant first. Every
   // other PDQ tool, and every hash database, has them most significant first.

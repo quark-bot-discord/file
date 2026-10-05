@@ -1,4 +1,4 @@
-/** sharp or pdq-wasm could not be loaded: no image can be hashed at all. */
+/** sharp or the hash worker could not be loaded: no image can be hashed at all. */
 export declare class HasherUnavailable extends Error {
 }
 /** Decoding the image would take more memory than one check is allowed. */
