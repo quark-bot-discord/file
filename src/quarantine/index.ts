@@ -28,6 +28,10 @@
  *
  *   items/<id>/record     sealed JSON: QuarantineRecord
  *   items/<id>/content    sealed bytes: the file as received
+ *   items/<id>/relevant/<part>  sealed JSON: relevant data added by an app
+ *                         after the match (the website's archive, cases and
+ *                         tickets for a bot match)
+ *   items/<id>/submitted  sealed JSON: the report as submitted to the NCA
  *   references/<id>       sealed JSON: QuarantineReference
  *   access/<yyyy>/<mm>/<time>-<rand>.json   plain JSON: AccessEntry
  */
@@ -61,6 +65,7 @@ export interface QuarantineSubject {
   username?: string;
   display_name?: string;
   guild_id?: string;
+  guild_name?: string;
   channel_id?: string;
   message_id?: string;
   attachment_id?: string;
@@ -70,6 +75,15 @@ export interface QuarantineSubject {
   /** Dashboard uploads only: the route it was sent to. */
   route?: string;
 }
+
+/**
+ * How urgent the report is, chosen by the person preparing it:
+ * `immediate_risk` a child is at immediate risk (call 999 first);
+ * `serious_harm` risk of serious harm (report as soon as reasonably
+ * practicable); `other` (report without undue delay).
+ */
+export const PRIORITIES = ["immediate_risk", "serious_harm", "other"] as const;
+export type Priority = (typeof PRIORITIES)[number];
 
 export interface QuarantineRecord {
   id: string;
@@ -88,8 +102,11 @@ export interface QuarantineRecord {
   /** The user's relevant data from the two weeks before, as the app held it. */
   relevant_data?: unknown;
   relevant_data_error?: string;
-  /** When `sweep` deletes the item. */
+  /** When `sweep` deletes the item, unless it is on hold. */
   expires_at: string;
+  priority?: { level: Priority; set_by: string; set_at: string };
+  /** Kept past its time: a law-enforcement request. Cleared to let it expire. */
+  hold?: { reason: string; set_by: string; set_at: string };
   report?: {
     reference: string;
     reported_at: string;
@@ -101,6 +118,14 @@ export interface QuarantineRecord {
 /** What is listed on the admin page: everything but the relevant data. */
 export type QuarantineSummary = Omit<QuarantineRecord, "relevant_data">;
 
+/** One item with everything added to it since. */
+export type QuarantineItem = QuarantineRecord & {
+  /** Parts added after the match, by name (`website`, ...). */
+  relevant_data_parts: Record<string, unknown>;
+  /** The report as it was submitted, once it has been. */
+  submitted?: unknown;
+};
+
 export interface QuarantineReference {
   id: string;
   reference: string;
@@ -109,6 +134,7 @@ export interface QuarantineReference {
   category: string;
   pdq: string;
   expires_at: string;
+  hold?: QuarantineRecord["hold"];
 }
 
 export interface AccessEntry {
@@ -122,6 +148,9 @@ export interface AccessEntry {
     | "export_fields"
     | "export_content"
     | "record_report"
+    | "set_priority"
+    | "set_hold"
+    | "add_relevant_data"
     | "expire"
     | "expire_reference";
   id?: string;
@@ -373,11 +402,107 @@ export class Quarantine {
     return records;
   }
 
-  /** One item's record, with its relevant data. Not the file. */
-  async get(id: string, actor: string): Promise<QuarantineRecord> {
-    const record = await this.readRecord(id);
+  /** One item's record, with its relevant data and the report as submitted. Not the file. */
+  async get(id: string, actor: string): Promise<QuarantineItem> {
+    const item = await this.readItem(id);
     await this.logAccess({ actor, action: "read", id });
+    return item;
+  }
+
+  private async readItem(id: string): Promise<QuarantineItem> {
+    const record = await this.readRecord(id);
+    const parts: Record<string, unknown> = {};
+    for (const name of await this.listNames(`items/${id}/relevant/`)) {
+      const plain = await this.getSealed(name);
+      if (plain)
+        parts[name.slice(`items/${id}/relevant/`.length)] = JSON.parse(
+          plain.toString("utf8"),
+        );
+    }
+    const submitted = await this.getSealed(`items/${id}/submitted`);
+    return {
+      ...record,
+      relevant_data_parts: parts,
+      submitted: submitted ? JSON.parse(submitted.toString("utf8")) : undefined,
+    };
+  }
+
+  /**
+   * Add relevant data to an item after the match, under a name: the website
+   * adds what it holds (archive rows, cases, tickets) to a bot's match.
+   */
+  async addRelevantData(
+    id: string,
+    part: string,
+    data: unknown,
+    actor: string,
+  ): Promise<void> {
+    if (!/^[a-z0-9-]{1,32}$/.test(part)) throw new Error("Bad part name");
+    await this.readRecord(id);
+    await this.putSealed(
+      `items/${id}/relevant/${part}`,
+      Buffer.from(JSON.stringify(data)),
+    );
+    await this.logAccess({ actor, action: "add_relevant_data", id, detail: part });
+  }
+
+  /** How urgent the report is. */
+  async setPriority(
+    id: string,
+    level: Priority,
+    actor: string,
+  ): Promise<QuarantineRecord> {
+    if (!PRIORITIES.includes(level)) throw new Error("Unknown priority");
+    const record = await this.readRecord(id);
+    record.priority = {
+      level,
+      set_by: actor,
+      set_at: this.now().toISOString(),
+    };
+    await this.writeRecord(record);
+    await this.logAccess({ actor, action: "set_priority", id, detail: level });
     return record;
+  }
+
+  /**
+   * Keep an item (and its report reference) past its time for a
+   * law-enforcement request, with the reason; `null` lifts the hold and the
+   * item expires at its usual time.
+   */
+  async setHold(
+    id: string,
+    reason: string | null,
+    actor: string,
+  ): Promise<QuarantineRecord> {
+    const record = await this.readRecord(id);
+    const clean = reason?.trim() ?? "";
+    if (reason !== null && (!clean || clean.length > 500))
+      throw new Error("The reason must be 1 to 500 characters");
+    record.hold = reason === null
+      ? undefined
+      : { reason: clean, set_by: actor, set_at: this.now().toISOString() };
+    await this.writeRecord(record);
+    const refName = `references/${id}`;
+    const plain = await this.getSealed(refName);
+    if (plain) {
+      const kept = JSON.parse(plain.toString("utf8")) as QuarantineReference;
+      kept.hold = record.hold;
+      await this.putSealed(refName, Buffer.from(JSON.stringify(kept)));
+    }
+    await this.logAccess({
+      actor,
+      action: "set_hold",
+      id,
+      detail: reason === null ? "lifted" : "set",
+    });
+    return record;
+  }
+
+  private async writeRecord(record: QuarantineRecord) {
+    await this.putSealed(
+      `items/${record.id}/record`,
+      Buffer.from(JSON.stringify(record)),
+    );
   }
 
   /**
@@ -385,9 +510,9 @@ export class Quarantine {
    * object. Logged as an export.
    */
   async reportFields(id: string, actor: string) {
-    const record = await this.readRecord(id);
+    const item = await this.readItem(id);
     await this.logAccess({ actor, action: "export_fields", id });
-    return reportFieldsOf(record);
+    return reportFieldsOf(item);
   }
 
   /**
@@ -419,7 +544,16 @@ export class Quarantine {
    */
   async recordReport(
     id: string,
-    { reference, reportedAt }: { reference: string; reportedAt: string },
+    {
+      reference,
+      reportedAt,
+      submitted,
+    }: {
+      reference: string;
+      reportedAt: string;
+      /** The report as submitted; the fields as they stand when not given. */
+      submitted?: unknown;
+    },
     actor: string,
   ): Promise<QuarantineRecord> {
     const cleanReference = reference.trim();
@@ -449,11 +583,21 @@ export class Quarantine {
       pdq: record.detection.pdq,
       expires_at: addDays(reportedIso, REFERENCE_RETENTION_DAYS),
     };
-    await this.putSealed(`references/${id}`, Buffer.from(JSON.stringify(kept)));
+    kept.hold = record.hold;
+    const asSubmitted =
+      submitted ?? reportFieldsOf(await this.readItem(id));
     await this.putSealed(
-      `items/${id}/record`,
-      Buffer.from(JSON.stringify(record)),
+      `items/${id}/submitted`,
+      Buffer.from(
+        JSON.stringify({
+          reference: cleanReference,
+          reported_at: reportedIso,
+          report: asSubmitted,
+        }),
+      ),
     );
+    await this.putSealed(`references/${id}`, Buffer.from(JSON.stringify(kept)));
+    await this.writeRecord(record);
     await this.logAccess({
       actor,
       action: "record_report",
@@ -494,8 +638,11 @@ export class Quarantine {
         if (error instanceof QuarantineNotFound) continue;
         throw error;
       }
-      if (Date.parse(record.expires_at) > now.getTime()) continue;
-      await this.remove(`items/${id}/content`);
+      if (record.hold || Date.parse(record.expires_at) > now.getTime())
+        continue;
+      // The record last, so an interrupted sweep is finished next time.
+      for (const name of await this.listNames(`items/${id}/`))
+        if (name !== `items/${id}/record`) await this.remove(name);
       await this.remove(`items/${id}/record`);
       await this.logAccess({ actor, action: "expire", id });
       items++;
@@ -504,7 +651,7 @@ export class Quarantine {
       const plain = await this.getSealed(name);
       if (!plain) continue;
       const kept = JSON.parse(plain.toString("utf8")) as QuarantineReference;
-      if (Date.parse(kept.expires_at) > now.getTime()) continue;
+      if (kept.hold || Date.parse(kept.expires_at) > now.getTime()) continue;
       await this.remove(name);
       await this.logAccess({ actor, action: "expire_reference", id: kept.id });
       references++;
@@ -529,82 +676,101 @@ function snowflakeTime(id?: string): string | undefined {
   return new Date(Number((BigInt(id) >> 22n) + 1420070400000n)).toISOString();
 }
 
+const PRIORITY_TEXT: Record<Priority, string> = {
+  immediate_risk:
+    "A child is at immediate risk: call 999 first, then report",
+  serious_harm:
+    "Risk of serious harm: report as soon as reasonably practicable",
+  other: "Report without undue delay",
+};
+
 /**
- * The report's fields from a record: Schedule 1, "where available". What
- * Quark does not hold is named under `not_available` rather than left out
- * silently.
+ * The report's fields from an item: Schedule 1, "where available", in the
+ * order the report is made (reporter, urgency, the user, the content and how
+ * it was found, where and when, the relevant data). What Quark does not hold
+ * is named under `not_available` rather than left out silently.
  */
-export function reportFieldsOf(record: QuarantineRecord) {
-  const s = record.subject;
-  const d = record.detection;
+export function reportFieldsOf(item: QuarantineRecord | QuarantineItem) {
+  const s = item.subject;
+  const d = item.detection;
   const notAvailable: string[] = [];
   if (!s.ip)
     notAvailable.push(
-      record.source === "dashboard"
+      item.source === "dashboard"
         ? "IP address: not received with this upload"
-        : "IP address: Discord does not give bots the IP address of the person who posted",
+        : "IP address: not available. Discord does not give bots the IP address of the person who posted",
     );
   notAvailable.push(
     "Email address and phone number: Quark does not receive them from Discord",
   );
   if (!s.user_id) notAvailable.push("Discord account: not known for this file");
+  if (!s.guild_name) notAvailable.push("Server name: not known at the time");
+  const parts =
+    "relevant_data_parts" in item ? item.relevant_data_parts : {};
   return {
-    prepared_at: new Date().toISOString(),
-    quarantine_id: record.id,
-    reporting_service: {
+    "1_reporting_service": {
       name: "Quark",
       description:
         "Discord bot that logs server activity, and its dashboard at quark.bot",
     },
-    content: {
-      description:
-        "Image file matched against known material by perceptual hash. Not viewed.",
-      file_type: record.content.type ?? null,
-      file_name: record.content.name ?? null,
-      size_bytes: record.content.bytes,
-      sha256: record.content.sha256,
-      held: "Kept encrypted in Quark's restricted store; exported separately on request.",
+    "2_priority": item.priority
+      ? { level: item.priority.level, meaning: PRIORITY_TEXT[item.priority.level] }
+      : { level: null, meaning: "Not chosen yet" },
+    "3_user": {
+      discord_user_id: s.user_id ?? null,
+      username: s.username ?? null,
+      display_name: s.display_name ?? null,
+      account_created_at: snowflakeTime(s.user_id) ?? null,
+      ip_address: s.ip ?? null,
+      ip_address_time: s.ip ? d.time : null,
+      user_agent: s.user_agent ?? null,
     },
-    detection: {
+    "4_content": {
+      description:
+        "Image file matched against known material by perceptual hash. Not viewed by Quark.",
+      file_type: item.content.type ?? null,
+      file_name: item.content.name ?? null,
+      size_bytes: item.content.bytes,
+      sha256: item.content.sha256,
+      held: "Kept encrypted in Quark's restricted store; the file is handed over separately.",
+    },
+    "5_how_detected": {
       method:
         "PDQ perceptual hash computed by Quark and matched by Project Arachnid Shield (Canadian Centre for Child Protection). Only the hash was sent.",
       provider: d.provider,
       classification: d.category,
       match_type: d.match_type,
       matched_entry: d.reference ?? null,
-      pdq_hash_base64: d.pdq,
+      match_response: d.match_details ?? null,
       pdq_hash_hex: Buffer.from(d.pdq, "base64").toString("hex"),
+      pdq_hash_base64: d.pdq,
       frame: d.frame ?? 0,
       frames: d.frames ?? null,
       all_frame_hashes_base64: d.hashes ?? [d.pdq],
-      detected_at: record.detected_at,
-      where: d.stage === "upload"
-        ? `Upload to the dashboard${s.route ? ` (${s.route})` : ""}`
-        : d.stage === "store"
-          ? "Attachment posted in a Discord server, checked when Quark stored it for its logs"
-          : "Attachment stored by Quark, checked before Quark re-posted it in a log",
     },
-    upload: {
-      time: d.time,
-      ip_address: s.ip ?? null,
-      user_agent: s.user_agent ?? null,
-    },
-    user: {
-      discord_user_id: s.user_id ?? null,
-      username: s.username ?? null,
-      display_name: s.display_name ?? null,
-      account_created_at: snowflakeTime(s.user_id) ?? null,
-    },
-    location: {
+    "6_when_and_where": {
+      posted_or_uploaded_at: d.time,
+      detected_at: item.detected_at,
+      where:
+        d.stage === "upload"
+          ? `Upload to the quark.bot dashboard${s.route ? ` (${s.route})` : ""}`
+          : d.stage === "store"
+            ? "Attachment posted in a Discord server, checked when Quark stored it for its logs"
+            : "Attachment stored by Quark, checked before Quark re-posted it in a log",
       discord_server_id: s.guild_id ?? d.guild_id ?? null,
+      discord_server_name: s.guild_name ?? null,
       discord_channel_id: s.channel_id ?? d.channel_id ?? null,
       discord_message_id: s.message_id ?? null,
       discord_attachment_id: s.attachment_id ?? d.attachment_id ?? null,
     },
-    relevant_data_two_weeks: record.relevant_data ?? null,
-    relevant_data_error: record.relevant_data_error ?? null,
-    report: record.report ?? null,
+    "7_relevant_data_two_weeks": {
+      at_match: item.relevant_data ?? null,
+      at_match_error: item.relevant_data_error ?? null,
+      added_since: parts,
+    },
     not_available: notAvailable,
+    quarantine_id: item.id,
+    report: item.report ?? null,
   };
 }
 

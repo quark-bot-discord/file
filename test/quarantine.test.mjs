@@ -280,23 +280,125 @@ test("the export hands the file over sealed under a one-off key, and logs it", a
   assert.ok(accessActions(client).includes("export_content"));
 });
 
-test("the report fields carry Schedule 1's items, and say what is not held", async () => {
+test("the report fields carry Schedule 1's items in order, and say what is not held", async () => {
   const { quarantine } = storeAt({ t: Date.parse("2026-11-05T10:00:00Z") });
   const id = await quarantine.put({
-    detection: detection({ stage: "store", source: "bot", channel_id: "1", attachment_id: "2" }),
+    detection: detection({
+      stage: "store",
+      source: "bot",
+      channel_id: "1",
+      attachment_id: "2",
+      match_details: { classification: "csam", match_type: "exact" },
+    }),
     content: Buffer.from("x"),
     contentType: "image/png",
-    subject: { user_id: "254307281023172608", guild_id: "706552170241064981", message_id: "3" },
+    subject: {
+      user_id: "254307281023172608",
+      username: "someone",
+      guild_id: "706552170241064981",
+      guild_name: "Test server",
+      message_id: "3",
+    },
   });
   const fields = await quarantine.reportFields(id, "admin:1");
-  assert.equal(fields.detection.classification, "csam");
-  assert.equal(fields.detection.pdq_hash_hex, "01".repeat(32));
-  assert.equal(fields.user.discord_user_id, "254307281023172608");
-  assert.equal(fields.user.account_created_at, "2016-12-02T18:06:20.596Z");
-  assert.equal(fields.location.discord_message_id, "3");
-  assert.equal(fields.upload.ip_address, null);
-  assert.ok(fields.not_available.some((line) => line.startsWith("IP address")));
+  assert.deepEqual(Object.keys(fields).slice(0, 7), [
+    "1_reporting_service",
+    "2_priority",
+    "3_user",
+    "4_content",
+    "5_how_detected",
+    "6_when_and_where",
+    "7_relevant_data_two_weeks",
+  ]);
+  assert.equal(fields["5_how_detected"].classification, "csam");
+  assert.deepEqual(fields["5_how_detected"].match_response, { classification: "csam", match_type: "exact" });
+  assert.equal(fields["5_how_detected"].pdq_hash_hex, "01".repeat(32));
+  assert.equal(fields["3_user"].discord_user_id, "254307281023172608");
+  assert.equal(fields["3_user"].account_created_at, "2016-12-02T18:06:20.596Z");
+  assert.equal(fields["3_user"].ip_address, null);
+  assert.equal(fields["6_when_and_where"].discord_server_name, "Test server");
+  assert.equal(fields["6_when_and_where"].discord_message_id, "3");
+  assert.ok(fields.not_available.some((line) => line.startsWith("IP address: not available")));
   assert.equal(typeof reportFieldsOf, "function");
+});
+
+test("priority: one of three levels, recorded, logged, and in the report", async () => {
+  const { client, quarantine } = storeAt({ t: Date.now() });
+  const id = await quarantine.put({ detection: detection(), content: Buffer.from("x"), subject: {} });
+  assert.equal((await quarantine.reportFields(id, "admin:1"))["2_priority"].level, null);
+  await assert.rejects(quarantine.setPriority(id, "whenever", "admin:1"));
+  const record = await quarantine.setPriority(id, "immediate_risk", "admin:1");
+  assert.equal(record.priority.level, "immediate_risk");
+  assert.equal(record.priority.set_by, "admin:1");
+  const fields = await quarantine.reportFields(id, "admin:1");
+  assert.match(fields["2_priority"].meaning, /call 999 first/);
+  assert.ok(accessActions(client).includes("set_priority"));
+});
+
+test("the two weeks of relevant data are snapshotted: at the match, and parts added after", async () => {
+  const { client, quarantine } = storeAt({ t: Date.now() });
+  const atMatch = {
+    window: { from: "2026-10-22T10:00:00.000Z", to: "2026-11-05T10:00:00.000Z" },
+    cached_messages: [{ id: "9", content: "hello", attachments: [{ id: "2", name: "a.png", size: 10 }] }],
+  };
+  const id = await quarantine.put({
+    detection: detection(), content: Buffer.from("x"), subject: {}, relevantData: atMatch,
+  });
+  await quarantine.addRelevantData(id, "website", { log_archive: { rows: [{ log_id: "L1" }] } }, "system:website");
+  await assert.rejects(quarantine.addRelevantData(id, "../x", {}, "system:website"));
+  for (const [name, body] of client.objects)
+    if (!name.startsWith("access/")) assert.ok(!body.toString().includes("hello"), `${name} in the clear`);
+  const item = await quarantine.get(id, "admin:1");
+  assert.deepEqual(item.relevant_data, atMatch);
+  assert.deepEqual(item.relevant_data_parts.website, { log_archive: { rows: [{ log_id: "L1" }] } });
+  // The list never carries it.
+  const [summary] = await quarantine.list("admin:1");
+  assert.equal(summary.relevant_data, undefined);
+  assert.ok(accessActions(client).includes("add_relevant_data"));
+});
+
+test("the report as submitted is kept with its reference, and a hold stops expiry", async () => {
+  const clock = { t: Date.parse("2026-11-05T10:00:00Z") };
+  const { client, quarantine } = storeAt(clock);
+  const id = await quarantine.put({ detection: detection(), content: Buffer.from("x"), subject: {} });
+  await quarantine.recordReport(id, { reference: "NCA-9", reportedAt: new Date(clock.t).toISOString() }, "admin:1");
+  const item = await quarantine.get(id, "admin:1");
+  assert.equal(item.submitted.reference, "NCA-9");
+  assert.ok(item.submitted.report["5_how_detected"], "the fields as they stood");
+
+  await assert.rejects(quarantine.setHold(id, "  ", "admin:1"));
+  await quarantine.setHold(id, "Police request, ref 123", "admin:1");
+  clock.t += 6 * 365 * DAY;
+  const held = await quarantine.sweep();
+  assert.equal(held.items, 0);
+  assert.equal(held.references, 0);
+  assert.ok(client.objects.has(`items/${id}/content`));
+  // Lifted: it goes, everything under it.
+  await quarantine.setHold(id, null, "admin:1");
+  const swept = await quarantine.sweep();
+  assert.equal(swept.items, 1);
+  assert.equal(swept.references, 1);
+  assert.deepEqual([...client.objects.keys()].filter((k) => k.startsWith("items/")), []);
+  assert.ok(accessActions(client).includes("set_hold"));
+});
+
+test("every access is logged, append-only, with who, what and when", async () => {
+  const { client, quarantine } = storeAt({ t: Date.parse("2026-11-05T10:00:00Z") });
+  const id = await quarantine.put({ detection: detection(), content: Buffer.from("x"), subject: {} });
+  await quarantine.list("admin:1");
+  await quarantine.get(id, "admin:1");
+  await quarantine.reportFields(id, "admin:2");
+  await quarantine.exportContent(id, "admin:2");
+  const names = [...client.objects.keys()].filter((k) => k.startsWith("access/"));
+  assert.equal(names.length, 5, "one object per access, none overwritten");
+  const entries = names.map((n) => JSON.parse(client.objects.get(n).toString()));
+  assert.deepEqual(
+    entries.map((e) => [e.actor, e.action]).sort(),
+    [["admin:1", "list"], ["admin:1", "read"], ["admin:2", "export_content"], ["admin:2", "export_fields"], ["system:dashboard", "write"]].sort(),
+  );
+  for (const e of entries) assert.match(e.time, /^2026-11-05T/);
+  const log = await quarantine.accessLog("admin:1");
+  assert.equal(log.length, 5);
 });
 
 // ---------------------------------------------------------------- frames

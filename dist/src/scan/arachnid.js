@@ -55,6 +55,7 @@ export class ArachnidShieldMatcher {
                         category: entry.classification,
                         matchType: entry.match_type ?? null,
                         reference: entry.near_match_details?.sha256_hex,
+                        details: entry,
                     };
                 waiting.forEach((w) => w.resolve(match));
             }

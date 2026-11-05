@@ -235,6 +235,17 @@ test("the matcher sends hashes only, batched, with basic auth", async () => {
     category: "csam",
     matchType: "near",
     reference: "ABC123",
+    // The service's answer as given: kept as the basis for a report.
+    details: {
+      classification: "csam",
+      match_type: "near",
+      near_match_details: {
+        sha1_base32: "X",
+        sha256_hex: "ABC123",
+        classification: "csam",
+        timestamp: 0,
+      },
+    },
   });
   assert.equal(shieldRequests.length, 1);
   const [request] = shieldRequests;

@@ -17,6 +17,8 @@ export interface Match {
   matchType: string | null;
   /** The matcher's identifier for the database entry that matched, if any. */
   reference?: string;
+  /** The matcher's answer for this hash, as it gave it: the basis for a report. */
+  details?: unknown;
 }
 
 /** A service that answers "is this hash known?". It is only ever given a hash. */
@@ -72,6 +74,8 @@ export interface Detection {
   frames?: { total: number; checked: number };
   /** The matcher's identifier for the database entry that matched. */
   reference?: string;
+  /** The matcher's answer, as it gave it. Kept in quarantine, not alerted. */
+  match_details?: unknown;
   guild_id: string;
   channel_id?: string;
   attachment_id?: string;
@@ -214,6 +218,7 @@ export class Scanner {
   maxBytes: number;
   failClosed: boolean;
   onDetection?: (detection: Detection) => void;
+  onQuarantined?: (id: string, detection: Detection) => void;
   alertWebhook?: string;
   concurrency: number;
   private maxWaiting: number;
@@ -238,6 +243,7 @@ export class Scanner {
     readTimeoutMs = 30_000,
     failClosed = true,
     onDetection,
+    onQuarantined,
     alertWebhook,
   }: {
     matcher: Matcher;
@@ -272,6 +278,11 @@ export class Scanner {
      */
     failClosed?: boolean;
     onDetection?: (detection: Detection) => void;
+    /**
+     * Called once a match is in quarantine, e.g. to have the website add
+     * what it holds about the person to the same item.
+     */
+    onQuarantined?: (id: string, detection: Detection) => void;
     /** Discord webhook URL that receives one message per detection. */
     alertWebhook?: string;
   }) {
@@ -297,6 +308,7 @@ export class Scanner {
     this.readTimeoutMs = readTimeoutMs;
     this.failClosed = failClosed;
     this.onDetection = onDetection;
+    this.onQuarantined = onQuarantined;
     this.alertWebhook = alertWebhook;
   }
 
@@ -524,6 +536,11 @@ export class Scanner {
           relevantData: relevant,
           relevantDataError: relevantError,
         });
+        try {
+          this.onQuarantined?.(quarantined.id, detection);
+        } catch (error) {
+          console.error("[FILE SCAN] onQuarantined failed", error);
+        }
       } catch (error) {
         quarantined.problem = `the quarantine write failed: ${(error as Error).message}`;
         console.error(

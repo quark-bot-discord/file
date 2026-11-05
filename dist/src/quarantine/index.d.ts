@@ -10,6 +10,7 @@ export interface QuarantineSubject {
     username?: string;
     display_name?: string;
     guild_id?: string;
+    guild_name?: string;
     channel_id?: string;
     message_id?: string;
     attachment_id?: string;
@@ -19,6 +20,14 @@ export interface QuarantineSubject {
     /** Dashboard uploads only: the route it was sent to. */
     route?: string;
 }
+/**
+ * How urgent the report is, chosen by the person preparing it:
+ * `immediate_risk` a child is at immediate risk (call 999 first);
+ * `serious_harm` risk of serious harm (report as soon as reasonably
+ * practicable); `other` (report without undue delay).
+ */
+export declare const PRIORITIES: readonly ["immediate_risk", "serious_harm", "other"];
+export type Priority = (typeof PRIORITIES)[number];
 export interface QuarantineRecord {
     id: string;
     version: 1;
@@ -36,8 +45,19 @@ export interface QuarantineRecord {
     /** The user's relevant data from the two weeks before, as the app held it. */
     relevant_data?: unknown;
     relevant_data_error?: string;
-    /** When `sweep` deletes the item. */
+    /** When `sweep` deletes the item, unless it is on hold. */
     expires_at: string;
+    priority?: {
+        level: Priority;
+        set_by: string;
+        set_at: string;
+    };
+    /** Kept past its time: a law-enforcement request. Cleared to let it expire. */
+    hold?: {
+        reason: string;
+        set_by: string;
+        set_at: string;
+    };
     report?: {
         reference: string;
         reported_at: string;
@@ -47,6 +67,13 @@ export interface QuarantineRecord {
 }
 /** What is listed on the admin page: everything but the relevant data. */
 export type QuarantineSummary = Omit<QuarantineRecord, "relevant_data">;
+/** One item with everything added to it since. */
+export type QuarantineItem = QuarantineRecord & {
+    /** Parts added after the match, by name (`website`, ...). */
+    relevant_data_parts: Record<string, unknown>;
+    /** The report as it was submitted, once it has been. */
+    submitted?: unknown;
+};
 export interface QuarantineReference {
     id: string;
     reference: string;
@@ -55,12 +82,13 @@ export interface QuarantineReference {
     category: string;
     pdq: string;
     expires_at: string;
+    hold?: QuarantineRecord["hold"];
 }
 export interface AccessEntry {
     time: string;
     /** `admin:<discord id>`, or `system:<what>` for the apps themselves. */
     actor: string;
-    action: "write" | "list" | "read" | "export_fields" | "export_content" | "record_report" | "expire" | "expire_reference";
+    action: "write" | "list" | "read" | "export_fields" | "export_content" | "record_report" | "set_priority" | "set_hold" | "add_relevant_data" | "expire" | "expire_reference";
     id?: string;
     detail?: string;
 }
@@ -111,20 +139,49 @@ export declare class Quarantine {
     private recordIds;
     /** Every item, newest first, without the relevant data or the file. */
     list(actor: string): Promise<QuarantineSummary[]>;
-    /** One item's record, with its relevant data. Not the file. */
-    get(id: string, actor: string): Promise<QuarantineRecord>;
+    /** One item's record, with its relevant data and the report as submitted. Not the file. */
+    get(id: string, actor: string): Promise<QuarantineItem>;
+    private readItem;
+    /**
+     * Add relevant data to an item after the match, under a name: the website
+     * adds what it holds (archive rows, cases, tickets) to a bot's match.
+     */
+    addRelevantData(id: string, part: string, data: unknown, actor: string): Promise<void>;
+    /** How urgent the report is. */
+    setPriority(id: string, level: Priority, actor: string): Promise<QuarantineRecord>;
+    /**
+     * Keep an item (and its report reference) past its time for a
+     * law-enforcement request, with the reason; `null` lifts the hold and the
+     * item expires at its usual time.
+     */
+    setHold(id: string, reason: string | null, actor: string): Promise<QuarantineRecord>;
+    private writeRecord;
     /**
      * The fields a report needs (Schedule 1, "where available"), as one
      * object. Logged as an export.
      */
     reportFields(id: string, actor: string): Promise<{
-        prepared_at: string;
-        quarantine_id: string;
-        reporting_service: {
+        "1_reporting_service": {
             name: string;
             description: string;
         };
-        content: {
+        "2_priority": {
+            level: "immediate_risk" | "serious_harm" | "other";
+            meaning: string;
+        } | {
+            level: null;
+            meaning: string;
+        };
+        "3_user": {
+            discord_user_id: string | null;
+            username: string | null;
+            display_name: string | null;
+            account_created_at: string | null;
+            ip_address: string | null;
+            ip_address_time: string | null;
+            user_agent: string | null;
+        };
+        "4_content": {
             description: string;
             file_type: string | null;
             file_name: string | null;
@@ -132,49 +189,45 @@ export declare class Quarantine {
             sha256: string;
             held: string;
         };
-        detection: {
+        "5_how_detected": {
             method: string;
             provider: string;
             classification: string;
             match_type: string | null;
             matched_entry: string | null;
-            pdq_hash_base64: string;
+            match_response: {} | null;
             pdq_hash_hex: string;
+            pdq_hash_base64: string;
             frame: number;
             frames: {
                 total: number;
                 checked: number;
             } | null;
             all_frame_hashes_base64: string[];
+        };
+        "6_when_and_where": {
+            posted_or_uploaded_at: string;
             detected_at: string;
             where: string;
-        };
-        upload: {
-            time: string;
-            ip_address: string | null;
-            user_agent: string | null;
-        };
-        user: {
-            discord_user_id: string | null;
-            username: string | null;
-            display_name: string | null;
-            account_created_at: string | null;
-        };
-        location: {
             discord_server_id: string;
+            discord_server_name: string | null;
             discord_channel_id: string | null;
             discord_message_id: string | null;
             discord_attachment_id: string | null;
         };
-        relevant_data_two_weeks: {} | null;
-        relevant_data_error: string | null;
+        "7_relevant_data_two_weeks": {
+            at_match: {} | null;
+            at_match_error: string | null;
+            added_since: Record<string, unknown>;
+        };
+        not_available: string[];
+        quarantine_id: string;
         report: {
             reference: string;
             reported_at: string;
             recorded_by: string;
             recorded_at: string;
         } | null;
-        not_available: string[];
     }>;
     /**
      * The file, sealed again under a new one-off key, for handing to the NCA.
@@ -191,9 +244,11 @@ export declare class Quarantine {
      * Record the NCA's reference for a submitted report. The item is then kept
      * at least a year from the report date, and the reference five years.
      */
-    recordReport(id: string, { reference, reportedAt }: {
+    recordReport(id: string, { reference, reportedAt, submitted, }: {
         reference: string;
         reportedAt: string;
+        /** The report as submitted; the fields as they stand when not given. */
+        submitted?: unknown;
     }, actor: string): Promise<QuarantineRecord>;
     /** Report references still kept, including those whose item has gone. */
     references(actor: string): Promise<QuarantineReference[]>;
@@ -209,18 +264,33 @@ export declare class Quarantine {
     }>;
 }
 /**
- * The report's fields from a record: Schedule 1, "where available". What
- * Quark does not hold is named under `not_available` rather than left out
- * silently.
+ * The report's fields from an item: Schedule 1, "where available", in the
+ * order the report is made (reporter, urgency, the user, the content and how
+ * it was found, where and when, the relevant data). What Quark does not hold
+ * is named under `not_available` rather than left out silently.
  */
-export declare function reportFieldsOf(record: QuarantineRecord): {
-    prepared_at: string;
-    quarantine_id: string;
-    reporting_service: {
+export declare function reportFieldsOf(item: QuarantineRecord | QuarantineItem): {
+    "1_reporting_service": {
         name: string;
         description: string;
     };
-    content: {
+    "2_priority": {
+        level: "immediate_risk" | "serious_harm" | "other";
+        meaning: string;
+    } | {
+        level: null;
+        meaning: string;
+    };
+    "3_user": {
+        discord_user_id: string | null;
+        username: string | null;
+        display_name: string | null;
+        account_created_at: string | null;
+        ip_address: string | null;
+        ip_address_time: string | null;
+        user_agent: string | null;
+    };
+    "4_content": {
         description: string;
         file_type: string | null;
         file_name: string | null;
@@ -228,49 +298,45 @@ export declare function reportFieldsOf(record: QuarantineRecord): {
         sha256: string;
         held: string;
     };
-    detection: {
+    "5_how_detected": {
         method: string;
         provider: string;
         classification: string;
         match_type: string | null;
         matched_entry: string | null;
-        pdq_hash_base64: string;
+        match_response: {} | null;
         pdq_hash_hex: string;
+        pdq_hash_base64: string;
         frame: number;
         frames: {
             total: number;
             checked: number;
         } | null;
         all_frame_hashes_base64: string[];
+    };
+    "6_when_and_where": {
+        posted_or_uploaded_at: string;
         detected_at: string;
         where: string;
-    };
-    upload: {
-        time: string;
-        ip_address: string | null;
-        user_agent: string | null;
-    };
-    user: {
-        discord_user_id: string | null;
-        username: string | null;
-        display_name: string | null;
-        account_created_at: string | null;
-    };
-    location: {
         discord_server_id: string;
+        discord_server_name: string | null;
         discord_channel_id: string | null;
         discord_message_id: string | null;
         discord_attachment_id: string | null;
     };
-    relevant_data_two_weeks: {} | null;
-    relevant_data_error: string | null;
+    "7_relevant_data_two_weeks": {
+        at_match: {} | null;
+        at_match_error: string | null;
+        added_since: Record<string, unknown>;
+    };
+    not_available: string[];
+    quarantine_id: string;
     report: {
         reference: string;
         reported_at: string;
         recorded_by: string;
         recorded_at: string;
     } | null;
-    not_available: string[];
 };
 /**
  * The store from the environment, or undefined when it is not configured.

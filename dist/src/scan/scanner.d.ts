@@ -9,6 +9,8 @@ export interface Match {
     matchType: string | null;
     /** The matcher's identifier for the database entry that matched, if any. */
     reference?: string;
+    /** The matcher's answer for this hash, as it gave it: the basis for a report. */
+    details?: unknown;
 }
 /** A service that answers "is this hash known?". It is only ever given a hash. */
 export interface Matcher {
@@ -74,6 +76,8 @@ export interface Detection {
     };
     /** The matcher's identifier for the database entry that matched. */
     reference?: string;
+    /** The matcher's answer, as it gave it. Kept in quarantine, not alerted. */
+    match_details?: unknown;
     guild_id: string;
     channel_id?: string;
     attachment_id?: string;
@@ -114,6 +118,7 @@ export declare class Scanner {
     maxBytes: number;
     failClosed: boolean;
     onDetection?: (detection: Detection) => void;
+    onQuarantined?: (id: string, detection: Detection) => void;
     alertWebhook?: string;
     concurrency: number;
     private maxWaiting;
@@ -124,7 +129,7 @@ export declare class Scanner {
     private cache;
     private reported;
     private lastComplaint;
-    constructor({ matcher, hasher, frameHasher, maxFrames, quarantine, maxBytes, concurrency, maxWaiting, maxWaitMs, readTimeoutMs, failClosed, onDetection, alertWebhook, }: {
+    constructor({ matcher, hasher, frameHasher, maxFrames, quarantine, maxBytes, concurrency, maxWaiting, maxWaitMs, readTimeoutMs, failClosed, onDetection, onQuarantined, alertWebhook, }: {
         matcher: Matcher;
         /** Computes the hash of one frame. Only replaced in tests. */
         hasher?: (image: Buffer) => Promise<PdqResult>;
@@ -157,6 +162,11 @@ export declare class Scanner {
          */
         failClosed?: boolean;
         onDetection?: (detection: Detection) => void;
+        /**
+         * Called once a match is in quarantine, e.g. to have the website add
+         * what it holds about the person to the same item.
+         */
+        onQuarantined?: (id: string, detection: Detection) => void;
         /** Discord webhook URL that receives one message per detection. */
         alertWebhook?: string;
     });

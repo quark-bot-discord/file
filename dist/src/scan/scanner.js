@@ -86,7 +86,7 @@ function readAll(stream, limit, timeoutMs) {
     });
 }
 export class Scanner {
-    constructor({ matcher, hasher, frameHasher, maxFrames = DEFAULT_MAX_FRAMES, quarantine, maxBytes = 32 * 1024 * 1024, concurrency = 2, maxWaiting = 200, maxWaitMs = 20000, readTimeoutMs = 30000, failClosed = true, onDetection, alertWebhook, }) {
+    constructor({ matcher, hasher, frameHasher, maxFrames = DEFAULT_MAX_FRAMES, quarantine, maxBytes = 32 * 1024 * 1024, concurrency = 2, maxWaiting = 200, maxWaitMs = 20000, readTimeoutMs = 30000, failClosed = true, onDetection, onQuarantined, alertWebhook, }) {
         this.active = 0;
         this.waiting = [];
         this.cache = new Map();
@@ -113,6 +113,7 @@ export class Scanner {
         this.readTimeoutMs = readTimeoutMs;
         this.failClosed = failClosed;
         this.onDetection = onDetection;
+        this.onQuarantined = onQuarantined;
         this.alertWebhook = alertWebhook;
     }
     /**
@@ -320,6 +321,12 @@ export class Scanner {
                     relevantData: relevant,
                     relevantDataError: relevantError,
                 });
+                try {
+                    this.onQuarantined?.(quarantined.id, detection);
+                }
+                catch (error) {
+                    console.error("[FILE SCAN] onQuarantined failed", error);
+                }
             }
             catch (error) {
                 quarantined.problem = `the quarantine write failed: ${error.message}`;
