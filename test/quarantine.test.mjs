@@ -555,7 +555,8 @@ test("the object store for log avatars puts and gets, and is off when not config
   const realSend = client.send;
   client.send = async (command) => {
     const answer = await realSend(command);
-    if (answer.Body) answer.Body = { transformToByteArray: async () => answer.Body };
+    const bytes = answer.Body;
+    if (bytes) answer.Body = { transformToByteArray: async () => bytes };
     return answer;
   };
   const store = new ObjectStore(client, "avatars");
