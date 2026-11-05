@@ -6,6 +6,7 @@ import { getFileType } from "../util/getFileType.js";
 import { checkBestCompression } from "../util/checkBestCompression.js";
 import { getCompressionIndicator } from "../util/getCompressionIndicator.js";
 import { compressData } from "./compressData.js";
+import { FileWithheld } from "../scan/withheld.js";
 /**
  * Downloads a file from a URL, compresses it with Brotli, and encrypts it
  * Prepends a single byte (0x01) to indicate Brotli compression
@@ -13,9 +14,11 @@ import { compressData } from "./compressData.js";
  * @param {String} key Key to encrypt the file with
  * @param {String} iv IV to encrypt the file with
  * @param {String} ip IP address to bind to (optional)
+ * @param {Function} inspect Given the downloaded body before anything is done
+ * with it; returns the stream to store, or throws FileWithheld (optional)
  * @returns {Promise<ReadableStream>}
  */
-export async function downloadFile(url, key, iv, ip) {
+export async function downloadFile(url, key, iv, ip, inspect) {
     if (!url || !key || !iv) {
         throw new Error("Invalid parameters: url, key, and iv are required");
     }
@@ -41,11 +44,14 @@ export async function downloadFile(url, key, iv, ip) {
                 callback();
             },
         });
-        const stream = res.body
+        const body = inspect ? await inspect(res.body) : res.body;
+        const stream = body
             .on("error", (error) => {
             throw error;
         })
-            .pipe(compressData(compression, res.headers.get("content-length") ? Number(res.headers.get("content-length")) : undefined))
+            .pipe(compressData(compression, res.headers.get("content-length")
+            ? Number(res.headers.get("content-length"))
+            : undefined))
             .on("error", (error) => {
             throw error;
         })
@@ -60,6 +66,8 @@ export async function downloadFile(url, key, iv, ip) {
         return stream;
     }
     catch (error) {
+        if (error instanceof FileWithheld)
+            throw error;
         throw new Error(`Failed to download and process file: ${error.message}`);
     }
 }

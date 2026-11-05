@@ -6,6 +6,7 @@ import { getFileType } from "../util/getFileType.js";
 import { checkBestCompression } from "../util/checkBestCompression.js";
 import { getCompressionIndicator } from "../util/getCompressionIndicator.js";
 import { compressData } from "./compressData.js";
+import { FileWithheld } from "../scan/withheld.js";
 
 /**
  * Downloads a file from a URL, compresses it with Brotli, and encrypts it
@@ -14,9 +15,17 @@ import { compressData } from "./compressData.js";
  * @param {String} key Key to encrypt the file with
  * @param {String} iv IV to encrypt the file with
  * @param {String} ip IP address to bind to (optional)
+ * @param {Function} inspect Given the downloaded body before anything is done
+ * with it; returns the stream to store, or throws FileWithheld (optional)
  * @returns {Promise<ReadableStream>}
  */
-export async function downloadFile(url: string, key: string, iv: string, ip?: string): Promise<NodeJS.ReadableStream> {
+export async function downloadFile(
+  url: string,
+  key: string,
+  iv: string,
+  ip?: string,
+  inspect?: (body: NodeJS.ReadableStream) => Promise<NodeJS.ReadableStream>,
+): Promise<NodeJS.ReadableStream> {
   if (!url || !key || !iv) {
     throw new Error("Invalid parameters: url, key, and iv are required");
   }
@@ -48,12 +57,19 @@ export async function downloadFile(url: string, key: string, iv: string, ip?: st
       },
     });
 
-    const stream = res.body
+    const body = inspect ? await inspect(res.body) : res.body;
+
+    const stream = body
       .on("error", (error: Error) => {
         throw error;
       })
       .pipe(
-        compressData(compression, res.headers.get("content-length") ? Number(res.headers.get("content-length")) : undefined)
+        compressData(
+          compression,
+          res.headers.get("content-length")
+            ? Number(res.headers.get("content-length"))
+            : undefined,
+        ),
       )
       .on("error", (error: Error) => {
         throw error;
@@ -69,6 +85,9 @@ export async function downloadFile(url: string, key: string, iv: string, ip?: st
 
     return stream;
   } catch (error: unknown) {
-    throw new Error(`Failed to download and process file: ${(<Error>error).message}`);
+    if (error instanceof FileWithheld) throw error;
+    throw new Error(
+      `Failed to download and process file: ${(<Error>error).message}`,
+    );
   }
 }
