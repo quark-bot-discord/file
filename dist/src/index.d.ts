@@ -66,8 +66,8 @@ export default class FileStorage {
         key: string;
         iv: string;
     };
-    getFileName(attachment_id: string, channel_id: string, guild_id: string, quark_premium: boolean, key?: null, extendedExpiration?: boolean): string;
-    downloadFile(url: string, guild_id: string, channel_id: string, attachment_id: string, premium_tier: number, file_size: number, quark_premium: boolean, key?: null, extendedExpiration?: boolean, 
+    getFileName(attachment_id: string, channel_id: string, guild_id: string, quark_premium: boolean, key?: string | null, extendedExpiration?: boolean): string;
+    downloadFile(url: string, guild_id: string, channel_id: string, attachment_id: string, premium_tier: number, file_size: number, quark_premium: boolean, key?: string | null, extendedExpiration?: boolean, 
     /** Identifiers to include if the file is reported, e.g. message_id. */
     context?: Record<string, string>, 
     /**
@@ -75,7 +75,7 @@ export default class FileStorage {
      * alert: who posted it, and their relevant data from the two weeks before.
      */
     evidence?: Omit<DetectionEvidence, "content">): Promise<import("@aws-sdk/client-s3").CompleteMultipartUploadCommandOutput>;
-    fetchFile(guild_id: string, channel_id: string, attachment_id: string, file_size: number, quark_premium: boolean, key?: null, extendedExpiration?: boolean, 
+    fetchFile(guild_id: string, channel_id: string, attachment_id: string, file_size: number, quark_premium: boolean, key?: string | null, extendedExpiration?: boolean, 
     /** Identifiers to include if the file is reported, e.g. message_id. */
     context?: Record<string, string>, 
     /** As for downloadFile. */
@@ -93,5 +93,5 @@ export default class FileStorage {
     fetchFileRaw(bucket: string, key: string): Promise<import("@aws-sdk/client-s3").GetObjectCommandOutput>;
     deleteFile(name: string): Promise<import("@aws-sdk/client-s3").DeleteObjectCommandOutput>;
     bulkDeleteFiles(files: string[]): Promise<import("@aws-sdk/client-s3").DeleteObjectsCommandOutput>;
-    checkFileExists(attachment_id: string, channel_id: string, guild_id: string, quark_premium: boolean, key?: null, extendedExpiration?: boolean): Promise<boolean>;
+    checkFileExists(attachment_id: string, channel_id: string, guild_id: string, quark_premium: boolean, key?: string | null, extendedExpiration?: boolean): Promise<boolean>;
 }

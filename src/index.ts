@@ -318,7 +318,7 @@ export default class FileStorage {
     channel_id: string,
     guild_id: string,
     quark_premium: boolean,
-    key = null,
+    key: string | null = null,
     extendedExpiration = false,
   ) {
     const stringToHash = `${attachment_id}/${channel_id}/${guild_id}`;
@@ -336,7 +336,7 @@ export default class FileStorage {
     premium_tier: number,
     file_size: number,
     quark_premium: boolean,
-    key = null,
+    key: string | null = null,
     extendedExpiration = false,
     /** Identifiers to include if the file is reported, e.g. message_id. */
     context?: Record<string, string>,
@@ -486,7 +486,7 @@ export default class FileStorage {
     attachment_id: string,
     file_size: number,
     quark_premium: boolean,
-    key = null,
+    key: string | null = null,
     extendedExpiration = false,
     /** Identifiers to include if the file is reported, e.g. message_id. */
     context?: Record<string, string>,
@@ -700,7 +700,7 @@ export default class FileStorage {
     channel_id: string,
     guild_id: string,
     quark_premium: boolean,
-    key = null,
+    key: string | null = null,
     extendedExpiration = false,
   ) {
     const fileName = this.getFileName(
