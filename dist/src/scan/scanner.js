@@ -85,6 +85,27 @@ function readAll(stream, limit, timeoutMs) {
         stream.once("error", onError);
     });
 }
+/**
+ * Who sent it: the caller's subject over what the detection says, with the
+ * server's name from the relevant data when the caller only had it there.
+ */
+function subjectOf(detection, given, relevant) {
+    const subject = {
+        user_id: detection.user_id ?? detection.context?.user_id,
+        guild_id: detection.guild_id,
+        channel_id: detection.channel_id,
+        message_id: detection.context?.message_id,
+        attachment_id: detection.attachment_id,
+    };
+    for (const [key, value] of Object.entries(given ?? {}))
+        if (value !== undefined && value !== null)
+            subject[key] = value;
+    const guildName = relevant
+        ?.guild?.name;
+    if (!subject.guild_name && typeof guildName === "string")
+        subject.guild_name = guildName;
+    return subject;
+}
 export class Scanner {
     constructor({ matcher, hasher, frameHasher, maxFrames = DEFAULT_MAX_FRAMES, quarantine, maxBytes = 32 * 1024 * 1024, concurrency = 2, maxWaiting = 200, maxWaitMs = 20000, readTimeoutMs = 30000, failClosed = true, onDetection, onQuarantined, alertWebhook, }) {
         this.active = 0;
@@ -311,13 +332,7 @@ export class Scanner {
                     content: evidence.content,
                     contentType: evidence.contentType,
                     fileName: evidence.fileName,
-                    subject: evidence.subject ?? {
-                        user_id: detection.user_id ?? detection.context?.user_id,
-                        guild_id: detection.guild_id,
-                        channel_id: detection.channel_id,
-                        message_id: detection.context?.message_id,
-                        attachment_id: detection.attachment_id,
-                    },
+                    subject: subjectOf(detection, evidence.subject, relevant),
                     relevantData: relevant,
                     relevantDataError: relevantError,
                 });

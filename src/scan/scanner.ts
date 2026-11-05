@@ -209,6 +209,32 @@ function readAll(
   });
 }
 
+/**
+ * Who sent it: the caller's subject over what the detection says, with the
+ * server's name from the relevant data when the caller only had it there.
+ */
+function subjectOf(
+  detection: Detection,
+  given: QuarantineSubject | undefined,
+  relevant: unknown,
+): QuarantineSubject {
+  const subject: QuarantineSubject = {
+    user_id: detection.user_id ?? detection.context?.user_id,
+    guild_id: detection.guild_id,
+    channel_id: detection.channel_id,
+    message_id: detection.context?.message_id,
+    attachment_id: detection.attachment_id,
+  };
+  for (const [key, value] of Object.entries(given ?? {}))
+    if (value !== undefined && value !== null)
+      (subject as Record<string, unknown>)[key] = value;
+  const guildName = (relevant as { guild?: { name?: unknown } } | undefined)
+    ?.guild?.name;
+  if (!subject.guild_name && typeof guildName === "string")
+    subject.guild_name = guildName;
+  return subject;
+}
+
 export class Scanner {
   matcher: Matcher;
   hasher: (image: Buffer) => Promise<PdqResult>;
@@ -526,13 +552,7 @@ export class Scanner {
           content: evidence.content,
           contentType: evidence.contentType,
           fileName: evidence.fileName,
-          subject: evidence.subject ?? {
-            user_id: detection.user_id ?? detection.context?.user_id,
-            guild_id: detection.guild_id,
-            channel_id: detection.channel_id,
-            message_id: detection.context?.message_id,
-            attachment_id: detection.attachment_id,
-          },
+          subject: subjectOf(detection, evidence.subject, relevant),
           relevantData: relevant,
           relevantDataError: relevantError,
         });
