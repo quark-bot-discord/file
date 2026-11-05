@@ -1,12 +1,13 @@
 /**
  * A plain S3 bucket for an app's own small files, configured from the
  * environment under a prefix. The website keeps log avatars uploaded on the
- * dashboard here (`LOG_AVATAR_*`), after the image check.
+ * dashboard here (`LOG_AVATAR_*`), after the image check, and an admin
+ * takedown deletes them again (`delete`).
  *
  *   <PREFIX>_BUCKET, <PREFIX>_S3_URL, <PREFIX>_S3_REGION,
  *   <PREFIX>_S3_ACCESS_KEY_ID, <PREFIX>_S3_SECRET_ACCESS_KEY
  */
-import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client, } from "@aws-sdk/client-s3";
 export class ObjectStore {
     constructor(client, bucket) {
         this.client = client;
@@ -31,6 +32,15 @@ export class ObjectStore {
                 return null;
             throw error;
         }
+    }
+    /**
+     * Deletes the object. True when it was there, false when it was already
+     * gone; an S3 delete of a missing key succeeds, so it is looked for first.
+     */
+    async delete(key) {
+        const there = (await this.get(key)) !== null;
+        await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
+        return there;
     }
 }
 export function objectStoreFromEnv(prefix, env = process.env) {
