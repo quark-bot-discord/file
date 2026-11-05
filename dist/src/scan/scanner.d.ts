@@ -193,11 +193,13 @@ export declare class Scanner {
     /** A loud log line, at most once a minute. */
     private complain;
     /**
-     * Hash a built-in image and make one lookup, and log whether each worked,
-     * so a missing native module or wrong credentials show up at start-up
-     * rather than as files silently going unchecked.
+     * Hash a built-in image and make one authenticated lookup with it, and log
+     * one line saying whether the check is live, so a missing native module or
+     * refused credentials show up at start-up rather than as files silently
+     * going unchecked. The lookup is the authenticated call (Arachnid Shield
+     * answers 401 to wrong credentials); the image is a 1x1 PNG.
      */
-    selfTest(): Promise<boolean>;
+    selfTest(app?: string): Promise<boolean>;
     /**
      * Record a match: a log line, the quarantine, the caller's callback, and the
      * alert webhook. The alert carries identifiers and hashes only: never the

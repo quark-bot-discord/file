@@ -525,3 +525,25 @@ test("no credentials: no scanner, and the check reads as off", () => {
   assert.equal(scanCredentialsSet({}), false);
   assert.equal(scanCredentialsSet({ ARACHNID_SHIELD_USERNAME: "u", ARACHNID_SHIELD_PASSWORD: "p" }), true);
 });
+
+test("the start-up self-test logs one line: LIVE, or NOT LIVE with the reason", async () => {
+  const lines = [];
+  const log = console.log;
+  const error = console.error;
+  console.log = (line) => lines.push(line);
+  console.error = (line) => lines.push(line);
+  try {
+    const live = new Scanner({ matcher: stubMatcher(), quarantine: {} });
+    assert.equal(await live.selfTest("website"), true);
+    const refused = new Scanner({
+      matcher: { name: "arachnid-shield", lookup: async () => { throw new Error("Arachnid Shield answered 401"); } },
+      quarantine: {},
+    });
+    assert.equal(await refused.selfTest("serverlog"), false);
+  } finally {
+    console.log = log;
+    console.error = error;
+  }
+  assert.match(lines[0], /^\[FILE SCAN\] LIVE in website: hashing works and test-matcher accepted the credentials/);
+  assert.match(lines[1], /^\[FILE SCAN\] NOT LIVE in serverlog, images cannot be checked: Arachnid Shield answered 401/);
+});

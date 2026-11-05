@@ -271,21 +271,23 @@ export class Scanner {
         console.error(`[FILE SCAN] ${message}`);
     }
     /**
-     * Hash a built-in image and make one lookup, and log whether each worked,
-     * so a missing native module or wrong credentials show up at start-up
-     * rather than as files silently going unchecked.
+     * Hash a built-in image and make one authenticated lookup with it, and log
+     * one line saying whether the check is live, so a missing native module or
+     * refused credentials show up at start-up rather than as files silently
+     * going unchecked. The lookup is the authenticated call (Arachnid Shield
+     * answers 401 to wrong credentials); the image is a 1x1 PNG.
      */
-    async selfTest() {
+    async selfTest(app = "this process") {
         if (!this.quarantine)
             console.error("[FILE SCAN] QUARANTINE NOT CONFIGURED (QUARANTINE_BUCKET, QUARANTINE_KEY): matches are withheld and alerted but not kept for a report");
         try {
             const { hash } = await this.hasher(SELF_TEST_IMAGE);
             await this.matcher.lookup(hash);
-            console.log(`[FILE SCAN] on: hashing and ${this.matcher.name} both working`);
+            console.log(`[FILE SCAN] LIVE in ${app}: hashing works and ${this.matcher.name} accepted the credentials${this.quarantine ? "; quarantine configured" : ""}`);
             return true;
         }
         catch (error) {
-            console.error(`[FILE SCAN] NOT WORKING, images cannot be checked: ${error.message}`);
+            console.error(`[FILE SCAN] NOT LIVE in ${app}, images cannot be checked: ${error.message}`);
             return false;
         }
     }

@@ -25,6 +25,8 @@ export declare function scanCredentialsSet(env?: NodeJS.ProcessEnv): boolean;
  * With no credentials it logs `[FILE SCAN] NOT WORKING: no credentials` once
  * (when reading process.env) and returns undefined.
  */
-export declare function scannerFromEnv(env?: NodeJS.ProcessEnv, { quarantine, }?: {
+export declare function scannerFromEnv(env?: NodeJS.ProcessEnv, { quarantine, app, }?: {
     quarantine?: Quarantine;
+    /** Named in the start-up line, e.g. "serverlog" or "website". */
+    app?: string;
 }): Scanner | undefined;

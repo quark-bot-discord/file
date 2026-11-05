@@ -25,13 +25,13 @@ export function scanCredentialsSet(env = process.env) {
  * With no credentials it logs `[FILE SCAN] NOT WORKING: no credentials` once
  * (when reading process.env) and returns undefined.
  */
-export function scannerFromEnv(env = process.env, { quarantine = quarantineFromEnv(env), } = {}) {
+export function scannerFromEnv(env = process.env, { quarantine = quarantineFromEnv(env), app = env.APM_SERVICE_NAME || env.OTEL_SERVICE_NAME || "this process", } = {}) {
     const username = env.ARACHNID_SHIELD_USERNAME;
     const password = env.ARACHNID_SHIELD_PASSWORD;
     if (!username || !password) {
         if (env === process.env && !warnedNoCredentials) {
             warnedNoCredentials = true;
-            console.error("[FILE SCAN] NOT WORKING: no credentials");
+            console.error(`[FILE SCAN] NOT WORKING: no credentials (${app})`);
         }
         return undefined;
     }
@@ -60,7 +60,7 @@ export function scannerFromEnv(env = process.env, { quarantine = quarantineFromE
         quarantine,
     });
     if (env === process.env)
-        void scanner.selfTest();
+        void scanner.selfTest(app);
     return scanner;
 }
 let warnedNoCredentials = false;

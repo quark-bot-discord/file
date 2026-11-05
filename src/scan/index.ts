@@ -49,14 +49,19 @@ export function scannerFromEnv(
   env: NodeJS.ProcessEnv = process.env,
   {
     quarantine = quarantineFromEnv(env),
-  }: { quarantine?: Quarantine } = {},
+    app = env.APM_SERVICE_NAME || env.OTEL_SERVICE_NAME || "this process",
+  }: {
+    quarantine?: Quarantine;
+    /** Named in the start-up line, e.g. "serverlog" or "website". */
+    app?: string;
+  } = {},
 ): Scanner | undefined {
   const username = env.ARACHNID_SHIELD_USERNAME;
   const password = env.ARACHNID_SHIELD_PASSWORD;
   if (!username || !password) {
     if (env === process.env && !warnedNoCredentials) {
       warnedNoCredentials = true;
-      console.error("[FILE SCAN] NOT WORKING: no credentials");
+      console.error(`[FILE SCAN] NOT WORKING: no credentials (${app})`);
     }
     return undefined;
   }
@@ -84,7 +89,7 @@ export function scannerFromEnv(
     maxFrames: positive("FILE_SCAN_MAX_FRAMES"),
     quarantine,
   });
-  if (env === process.env) void scanner.selfTest();
+  if (env === process.env) void scanner.selfTest(app);
   return scanner;
 }
 
