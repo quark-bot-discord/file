@@ -1,5 +1,6 @@
 import { Readable } from "stream";
-import type { PdqResult } from "./pdq.js";
+import type { PdqFrames, PdqResult } from "./pdq.js";
+import type { Quarantine, QuarantineSubject } from "../quarantine/index.js";
 import type { ScanStage } from "./withheld.js";
 export interface Match {
     /** The matcher's classification, e.g. `csam`. */
@@ -16,11 +17,27 @@ export interface Matcher {
 }
 export type Verdict = {
     status: "clear";
+    /** Base64 PDQ hash of the first frame. */
     hash: string;
+    /** Every frame's hash that was looked up, base64. */
+    hashes?: string[];
+    /** Frames in the file, and how many were hashed. */
+    frames?: {
+        total: number;
+        checked: number;
+    };
 } | ({
     status: "match";
+    /** Base64 PDQ hash of the frame that matched. */
     hash: string;
     provider: string;
+    /** Which frame matched (0 for a still image). */
+    frame?: number;
+    hashes?: string[];
+    frames?: {
+        total: number;
+        checked: number;
+    };
 } & Match)
 /** Nothing to check: not an image, or an image with no features to hash. */
  | {
@@ -39,24 +56,61 @@ export type Verdict = {
 export interface Detection {
     time: string;
     stage: ScanStage;
+    /** Where it was found: a logged attachment, an asset, a dashboard upload. */
+    source?: "bot" | "assets" | "dashboard";
     provider: string;
     category: string;
     match_type: string | null;
-    /** Base64 PDQ hash of the file. */
+    /** Base64 PDQ hash of the frame that matched. */
     pdq: string;
+    /** Which frame of an animation matched. */
+    frame?: number;
+    /** Every frame hash that was looked up, base64. */
+    hashes?: string[];
+    /** Frames in the file, and how many were checked. */
+    frames?: {
+        total: number;
+        checked: number;
+    };
     /** The matcher's identifier for the database entry that matched. */
     reference?: string;
     guild_id: string;
-    channel_id: string;
-    attachment_id: string;
+    channel_id?: string;
+    attachment_id?: string;
+    /** The Discord account that posted or uploaded it, when known. */
+    user_id?: string;
     /** Object name in the bucket (a marker at `store`, the file at `reupload`). */
-    object: string;
+    object?: string;
+    /** The dashboard route an upload came to. */
+    route?: string;
     /** Whatever the caller passed, e.g. message_id and user_id. */
     context?: Record<string, string>;
+}
+/**
+ * What goes into quarantine with a detection, besides the detection itself.
+ * None of it is ever sent in the alert.
+ */
+export interface DetectionEvidence {
+    /** The file itself, exactly as it was received. */
+    content?: Buffer;
+    /** Its type, e.g. image/png. */
+    contentType?: string;
+    /** Its name, as the uploader gave it. */
+    fileName?: string;
+    /** Who sent it and from where, as far as the caller knows. */
+    subject?: QuarantineSubject;
+    /**
+     * The relevant data about that person from the two weeks before, as the
+     * caller holds it. Called only on a match. Errors are recorded, not thrown.
+     */
+    relevantData?: () => unknown | Promise<unknown>;
 }
 export declare class Scanner {
     matcher: Matcher;
     hasher: (image: Buffer) => Promise<PdqResult>;
+    frameHasher: (image: Buffer, maxFrames: number) => Promise<PdqFrames>;
+    maxFrames: number;
+    quarantine?: Quarantine;
     maxBytes: number;
     failClosed: boolean;
     onDetection?: (detection: Detection) => void;
@@ -70,10 +124,19 @@ export declare class Scanner {
     private cache;
     private reported;
     private lastComplaint;
-    constructor({ matcher, hasher, maxBytes, concurrency, maxWaiting, maxWaitMs, readTimeoutMs, failClosed, onDetection, alertWebhook, }: {
+    constructor({ matcher, hasher, frameHasher, maxFrames, quarantine, maxBytes, concurrency, maxWaiting, maxWaitMs, readTimeoutMs, failClosed, onDetection, alertWebhook, }: {
         matcher: Matcher;
-        /** Computes the hash. Only replaced in tests. */
+        /** Computes the hash of one frame. Only replaced in tests. */
         hasher?: (image: Buffer) => Promise<PdqResult>;
+        /** Computes the hash of each frame. Only replaced in tests. */
+        frameHasher?: (image: Buffer, maxFrames: number) => Promise<PdqFrames>;
+        /**
+         * Frames of an animated GIF or WebP that are checked. Past this many,
+         * this many are checked, spread evenly from the first to the last.
+         */
+        maxFrames?: number;
+        /** Where a matched file and its data are kept for a report. */
+        quarantine?: Quarantine;
         /** Images larger than this are not read into memory and so not checked. */
         maxBytes?: number;
         /**
@@ -97,8 +160,13 @@ export declare class Scanner {
         /** Discord webhook URL that receives one message per detection. */
         alertWebhook?: string;
     });
-    /** Check one whole file held in memory. Never throws. */
+    /**
+     * Check one whole file held in memory. Every frame of an animation is
+     * checked, up to `maxFrames`. Never throws.
+     */
     check(file: Buffer): Promise<Verdict>;
+    /** One hash looked up, through the cache. Throws if the matcher fails. */
+    private lookupOne;
     /**
      * Check a file that is still a stream. An image is read into memory, checked,
      * and handed back as a new stream over the same bytes. Anything that is not
@@ -108,6 +176,7 @@ export declare class Scanner {
     scanStream(source: NodeJS.ReadableStream, size: number, stage: ScanStage): Promise<{
         verdict: Verdict;
         stream: Readable;
+        file?: Buffer;
     }>;
     private acquire;
     private release;
@@ -120,9 +189,14 @@ export declare class Scanner {
      */
     selfTest(): Promise<boolean>;
     /**
-     * Record a match: a log line, the caller's callback, and the alert webhook.
-     * Identifiers and hashes only. Never the file, never a link to it.
+     * Record a match: a log line, the quarantine, the caller's callback, and the
+     * alert webhook. The alert carries identifiers and hashes only: never the
+     * file, a link to it, or anything about the person beyond their id.
+     *
+     * Resolves with the quarantine id, or undefined when nothing was kept
+     * (no quarantine configured, a repeat, or the write failed: each logged).
+     * Never rejects.
      */
-    report(detection: Detection): void;
+    report(detection: Detection, evidence?: DetectionEvidence): Promise<string | undefined>;
     private alert;
 }

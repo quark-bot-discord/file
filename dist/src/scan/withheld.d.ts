@@ -6,7 +6,8 @@
  * passed a check.
  */
 export type WithheldReason = "csam" | "harmful-abusive-material" | "unchecked" | (string & {});
-export type ScanStage = "store" | "reupload";
+/** `upload`: a file sent to the dashboard, refused before it is used. */
+export type ScanStage = "store" | "reupload" | "upload";
 /** Thrown by downloadFile and fetchFile instead of storing or returning a file. */
 export declare class FileWithheld extends Error {
     reason: WithheldReason;

@@ -18,7 +18,7 @@ import { fetchFile as _fetchFile } from "./core/fetchFile.js";
 import { checkMaxAttachmentSize } from "./util/checkMaxAttachmentSize.js";
 import { sortFiles } from "./util/sortFiles.js";
 import { FileWithheld, Scanner, scannerFromEnv } from "./scan/index.js";
-import type { Verdict } from "./scan/index.js";
+import type { DetectionEvidence, Verdict } from "./scan/index.js";
 import https from "https";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 const httpsAgent = new https.Agent({
@@ -60,9 +60,25 @@ export {
   FileWithheld,
   Scanner,
 };
-export { ArachnidShieldMatcher, scannerFromEnv } from "./scan/index.js";
+export {
+  ArachnidShieldMatcher,
+  scanCredentialsSet,
+  scannerFromEnv,
+} from "./scan/index.js";
+export {
+  Quarantine,
+  QuarantineNotFound,
+  quarantineFromEnv,
+  reportFieldsOf,
+} from "./quarantine/index.js";
+export type {
+  QuarantineRecord,
+  QuarantineSubject,
+  QuarantineSummary,
+} from "./quarantine/index.js";
 export type {
   Detection,
+  DetectionEvidence,
   Match,
   Matcher,
   ScanStage,
@@ -324,6 +340,11 @@ export default class FileStorage {
     extendedExpiration = false,
     /** Identifiers to include if the file is reported, e.g. message_id. */
     context?: Record<string, string>,
+    /**
+     * Kept with the file in quarantine if it matches, never sent in the
+     * alert: who posted it, and their relevant data from the two weeks before.
+     */
+    evidence?: Omit<DetectionEvidence, "content">,
   ) {
     const maxFileSize = this.checkMaxAttachmentSize(premium_tier);
 
@@ -354,7 +375,7 @@ export default class FileStorage {
     const scanner = this.scanner;
     // Set by the callback below; a property so the compiler does not assume
     // it is still undefined afterwards.
-    const scan: { verdict?: Verdict } = {};
+    const scan: { verdict?: Verdict; file?: Buffer } = {};
 
     let stream;
     try {
@@ -367,6 +388,7 @@ export default class FileStorage {
           (async (body) => {
             const scanned = await scanner.scanStream(body, file_size, "store");
             scan.verdict = scanned.verdict;
+            if (scanned.verdict.status === "match") scan.file = scanned.file;
             if (scanned.verdict.status === "match") {
               scanned.stream.destroy();
               throw new FileWithheld(scanned.verdict.category, "store");
@@ -416,20 +438,28 @@ export default class FileStorage {
               ),
             );
         }
-        scanner.report({
-          time: new Date().toISOString(),
-          stage: "store",
-          provider: verdict.provider,
-          category: verdict.category,
-          match_type: verdict.matchType,
-          pdq: verdict.hash,
-          reference: verdict.reference,
-          guild_id: String(guild_id),
-          channel_id: String(channel_id),
-          attachment_id: String(attachment_id),
-          object: fileName,
-          context,
-        });
+        void scanner.report(
+          {
+            time: new Date().toISOString(),
+            stage: "store",
+            source: key == null ? "bot" : "assets",
+            provider: verdict.provider,
+            category: verdict.category,
+            match_type: verdict.matchType,
+            pdq: verdict.hash,
+            frame: verdict.frame,
+            reference: verdict.reference,
+            guild_id: String(guild_id),
+            channel_id: String(channel_id),
+            attachment_id: String(attachment_id),
+            user_id: context?.user_id,
+            object: fileName,
+            context,
+            hashes: verdict.hashes,
+            frames: verdict.frames,
+          },
+          { ...evidence, content: scan.file },
+        );
       }
       throw error;
     }
@@ -459,6 +489,8 @@ export default class FileStorage {
     extendedExpiration = false,
     /** Identifiers to include if the file is reported, e.g. message_id. */
     context?: Record<string, string>,
+    /** As for downloadFile. */
+    evidence?: Omit<DetectionEvidence, "content">,
   ) {
     const fileName = this.getFileName(
       attachment_id,
@@ -552,20 +584,28 @@ export default class FileStorage {
       scanned.stream.destroy();
       // @ts-ignore the Node body is a Readable
       raw.Body.destroy?.();
-      this.scanner.report({
-        time: new Date().toISOString(),
-        stage: "reupload",
-        provider: verdict.provider,
-        category: verdict.category,
-        match_type: verdict.matchType,
-        pdq: verdict.hash,
-        reference: verdict.reference,
-        guild_id: String(guild_id),
-        channel_id: String(channel_id),
-        attachment_id: String(attachment_id),
-        object: fileName,
-        context,
-      });
+      void this.scanner.report(
+        {
+          time: new Date().toISOString(),
+          stage: "reupload",
+          source: key == null ? "bot" : "assets",
+          provider: verdict.provider,
+          category: verdict.category,
+          match_type: verdict.matchType,
+          pdq: verdict.hash,
+          frame: verdict.frame,
+          reference: verdict.reference,
+          guild_id: String(guild_id),
+          channel_id: String(channel_id),
+          attachment_id: String(attachment_id),
+          user_id: context?.user_id,
+          object: fileName,
+          context,
+          hashes: verdict.hashes,
+          frames: verdict.frames,
+        },
+        { ...evidence, content: scanned.file },
+      );
       throw new FileWithheld(verdict.category, "reupload");
     }
 

@@ -5,9 +5,12 @@ import { fetchFile as _fetchFile } from "./core/fetchFile.js";
 import { checkMaxAttachmentSize } from "./util/checkMaxAttachmentSize.js";
 import { sortFiles } from "./util/sortFiles.js";
 import { FileWithheld, Scanner } from "./scan/index.js";
+import type { DetectionEvidence } from "./scan/index.js";
 export { checkMaxAttachmentSize, sortFiles, NoSuchKey, _fetchFile, _downloadFile, FileWithheld, Scanner, };
-export { ArachnidShieldMatcher, scannerFromEnv } from "./scan/index.js";
-export type { Detection, Match, Matcher, ScanStage, Verdict, WithheldReason, } from "./scan/index.js";
+export { ArachnidShieldMatcher, scanCredentialsSet, scannerFromEnv, } from "./scan/index.js";
+export { Quarantine, QuarantineNotFound, quarantineFromEnv, reportFieldsOf, } from "./quarantine/index.js";
+export type { QuarantineRecord, QuarantineSubject, QuarantineSummary, } from "./quarantine/index.js";
+export type { Detection, DetectionEvidence, Match, Matcher, ScanStage, Verdict, WithheldReason, } from "./scan/index.js";
 export default class FileStorage {
     downloadIp?: string;
     encryptionSecret?: string;
@@ -66,10 +69,17 @@ export default class FileStorage {
     getFileName(attachment_id: string, channel_id: string, guild_id: string, quark_premium: boolean, key?: null, extendedExpiration?: boolean): string;
     downloadFile(url: string, guild_id: string, channel_id: string, attachment_id: string, premium_tier: number, file_size: number, quark_premium: boolean, key?: null, extendedExpiration?: boolean, 
     /** Identifiers to include if the file is reported, e.g. message_id. */
-    context?: Record<string, string>): Promise<import("@aws-sdk/client-s3").CompleteMultipartUploadCommandOutput>;
+    context?: Record<string, string>, 
+    /**
+     * Kept with the file in quarantine if it matches, never sent in the
+     * alert: who posted it, and their relevant data from the two weeks before.
+     */
+    evidence?: Omit<DetectionEvidence, "content">): Promise<import("@aws-sdk/client-s3").CompleteMultipartUploadCommandOutput>;
     fetchFile(guild_id: string, channel_id: string, attachment_id: string, file_size: number, quark_premium: boolean, key?: null, extendedExpiration?: boolean, 
     /** Identifiers to include if the file is reported, e.g. message_id. */
-    context?: Record<string, string>): Promise<{
+    context?: Record<string, string>, 
+    /** As for downloadFile. */
+    evidence?: Omit<DetectionEvidence, "content">): Promise<{
         stream: NodeJS.ReadableStream;
         size: number | undefined;
         name: string;

@@ -1,5 +1,5 @@
 import { Readable } from "stream";
-import { HasherUnavailable, pdqHash, TooManyPixels } from "./pdq.js";
+import { DEFAULT_MAX_FRAMES, HasherUnavailable, pdqHashFrames, TooManyPixels, } from "./pdq.js";
 import { isHashableImage, SNIFF_BYTES } from "./sniff.js";
 /** A 1x1 PNG. */
 const SELF_TEST_IMAGE = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
@@ -86,14 +86,26 @@ function readAll(stream, limit, timeoutMs) {
     });
 }
 export class Scanner {
-    constructor({ matcher, hasher = pdqHash, maxBytes = 32 * 1024 * 1024, concurrency = 2, maxWaiting = 200, maxWaitMs = 20000, readTimeoutMs = 30000, failClosed = true, onDetection, alertWebhook, }) {
+    constructor({ matcher, hasher, frameHasher, maxFrames = DEFAULT_MAX_FRAMES, quarantine, maxBytes = 32 * 1024 * 1024, concurrency = 2, maxWaiting = 200, maxWaitMs = 20000, readTimeoutMs = 30000, failClosed = true, onDetection, alertWebhook, }) {
         this.active = 0;
         this.waiting = [];
         this.cache = new Map();
         this.reported = new Set();
         this.lastComplaint = 0;
         this.matcher = matcher;
-        this.hasher = hasher;
+        this.frameHasher =
+            frameHasher ??
+                (hasher
+                    ? async (image) => ({
+                        frames: [{ ...(await hasher(image)), frame: 0 }],
+                        total: 1,
+                    })
+                    : pdqHashFrames);
+        this.hasher =
+            hasher ??
+                (async (image) => (await this.frameHasher(image, 1)).frames[0]);
+        this.maxFrames = maxFrames;
+        this.quarantine = quarantine;
         this.maxBytes = maxBytes;
         this.concurrency = concurrency;
         this.maxWaiting = maxWaiting;
@@ -103,13 +115,16 @@ export class Scanner {
         this.onDetection = onDetection;
         this.alertWebhook = alertWebhook;
     }
-    /** Check one whole file held in memory. Never throws. */
+    /**
+     * Check one whole file held in memory. Every frame of an animation is
+     * checked, up to `maxFrames`. Never throws.
+     */
     async check(file) {
         if (!isHashableImage(file))
             return { status: "skipped", reason: "not_image" };
         let pdq;
         try {
-            pdq = await this.hasher(file);
+            pdq = await this.frameHasher(file, this.maxFrames);
         }
         catch (error) {
             if (error instanceof HasherUnavailable) {
@@ -121,26 +136,40 @@ export class Scanner {
                 reason: error instanceof TooManyPixels ? "too_many_pixels" : "undecodable",
             };
         }
-        if (pdq.quality < MIN_QUALITY)
+        const usable = pdq.frames.filter((f) => f.quality >= MIN_QUALITY);
+        if (usable.length === 0)
             return { status: "skipped", reason: "featureless" };
-        const hash = pdq.hash.toString("base64");
-        const cached = this.cache.get(hash);
-        if (cached && cached.expires > Date.now())
-            return cached.verdict;
-        let verdict;
+        const frames = { total: pdq.total, checked: pdq.frames.length };
+        const hashes = [...new Set(usable.map((f) => f.hash.toString("base64")))];
+        let results;
         try {
-            const match = await this.matcher.lookup(pdq.hash);
-            verdict = match
-                ? { status: "match", hash, provider: this.matcher.name, ...match }
-                : { status: "clear", hash };
+            results = await Promise.all(hashes.map((hash) => this.lookupOne(Buffer.from(hash, "base64"))));
         }
         catch (error) {
             this.complain(`MATCHER UNAVAILABLE: ${error.message}`);
             return { status: "error", reason: "matcher_unavailable" };
         }
+        const matched = results.findIndex((r) => r.status === "match");
+        if (matched !== -1) {
+            const verdict = results[matched];
+            const frame = usable.find((f) => f.hash.toString("base64") === verdict.hash)?.frame;
+            return { ...verdict, frame, hashes, frames };
+        }
+        return { status: "clear", hash: hashes[0], hashes, frames };
+    }
+    /** One hash looked up, through the cache. Throws if the matcher fails. */
+    async lookupOne(hash) {
+        const key = hash.toString("base64");
+        const cached = this.cache.get(key);
+        if (cached && cached.expires > Date.now())
+            return cached.verdict;
+        const match = await this.matcher.lookup(hash);
+        const verdict = match
+            ? { status: "match", hash: key, provider: this.matcher.name, ...match }
+            : { status: "clear", hash: key };
         if (this.cache.size >= CACHE_ENTRIES)
             this.cache.clear();
-        this.cache.set(hash, { verdict, expires: Date.now() + CACHE_MS });
+        this.cache.set(key, { verdict, expires: Date.now() + CACHE_MS });
         return verdict;
     }
     /**
@@ -175,6 +204,7 @@ export class Scanner {
             return {
                 verdict: await this.check(file),
                 stream: Readable.from([file], { objectMode: false }),
+                file,
             };
         }
         finally {
@@ -224,6 +254,8 @@ export class Scanner {
      * rather than as files silently going unchecked.
      */
     async selfTest() {
+        if (!this.quarantine)
+            console.error("[FILE SCAN] QUARANTINE NOT CONFIGURED (QUARANTINE_BUCKET, QUARANTINE_KEY): matches are withheld and alerted but not kept for a report");
         try {
             const { hash } = await this.hasher(SELF_TEST_IMAGE);
             await this.matcher.lookup(hash);
@@ -236,17 +268,64 @@ export class Scanner {
         }
     }
     /**
-     * Record a match: a log line, the caller's callback, and the alert webhook.
-     * Identifiers and hashes only. Never the file, never a link to it.
+     * Record a match: a log line, the quarantine, the caller's callback, and the
+     * alert webhook. The alert carries identifiers and hashes only: never the
+     * file, a link to it, or anything about the person beyond their id.
+     *
+     * Resolves with the quarantine id, or undefined when nothing was kept
+     * (no quarantine configured, a repeat, or the write failed: each logged).
+     * Never rejects.
      */
-    report(detection) {
-        const key = `${detection.guild_id}/${detection.channel_id}/${detection.attachment_id}`;
-        if (this.reported.has(key))
-            return;
+    async report(detection, evidence = {}) {
+        const key = detection.attachment_id
+            ? `${detection.guild_id}/${detection.channel_id}/${detection.attachment_id}`
+            : `${detection.source}/${detection.guild_id}/${detection.user_id}/${detection.pdq}`;
+        if (this.reported.has(key)) {
+            console.warn(`[FILE SCAN] MATCH (repeat) ${JSON.stringify(detection)}`);
+            return undefined;
+        }
         if (this.reported.size >= CACHE_ENTRIES)
             this.reported.clear();
         this.reported.add(key);
         console.warn(`[FILE SCAN] MATCH ${JSON.stringify(detection)}`);
+        let quarantined = {};
+        if (!this.quarantine) {
+            quarantined = { problem: "no quarantine store is configured" };
+        }
+        else if (!evidence.content) {
+            quarantined = { problem: "the file was not in hand to keep" };
+        }
+        else {
+            try {
+                let relevant;
+                let relevantError;
+                try {
+                    relevant = await evidence.relevantData?.();
+                }
+                catch (error) {
+                    relevantError = error.message;
+                }
+                quarantined.id = await this.quarantine.put({
+                    detection,
+                    content: evidence.content,
+                    contentType: evidence.contentType,
+                    fileName: evidence.fileName,
+                    subject: evidence.subject ?? {
+                        user_id: detection.user_id ?? detection.context?.user_id,
+                        guild_id: detection.guild_id,
+                        channel_id: detection.channel_id,
+                        message_id: detection.context?.message_id,
+                        attachment_id: detection.attachment_id,
+                    },
+                    relevantData: relevant,
+                    relevantDataError: relevantError,
+                });
+            }
+            catch (error) {
+                quarantined.problem = `the quarantine write failed: ${error.message}`;
+                console.error(`[FILE SCAN] NOT QUARANTINED ${quarantined.problem} ${JSON.stringify(detection)}`);
+            }
+        }
         try {
             this.onDetection?.(detection);
         }
@@ -254,17 +333,35 @@ export class Scanner {
             console.error("[FILE SCAN] onDetection failed", error);
         }
         if (this.alertWebhook) {
-            this.alert(detection).catch((error) => console.error(`[FILE SCAN] ALERT NOT DELIVERED ${error.message} ${JSON.stringify(detection)}`));
+            await this.alert(detection, quarantined).catch((error) => console.error(`[FILE SCAN] ALERT NOT DELIVERED ${error.message} ${JSON.stringify(detection)}`));
         }
+        else {
+            console.error(`[FILE SCAN] NO ALERT WEBHOOK (FILE_SCAN_ALERT_WEBHOOK) for ${JSON.stringify(detection)}`);
+        }
+        return quarantined.id;
     }
-    async alert(detection) {
+    async alert(detection, quarantined) {
+        const stage = detection.stage === "store"
+            ? "before storing (the original may still be on Discord)"
+            : detection.stage === "reupload"
+                ? "before re-upload (the stored copy is kept until it expires)"
+                : `refused at upload on the dashboard${detection.route ? ` (${detection.route})` : ""}`;
+        const where = [
+            `Server \`${detection.guild_id}\``,
+            detection.channel_id && `channel \`${detection.channel_id}\``,
+            detection.attachment_id && `attachment \`${detection.attachment_id}\``,
+            detection.user_id && `user \`${detection.user_id}\``,
+        ].filter(Boolean);
         const lines = [
-            `**File withheld: matched \`${detection.category}\`** (${detection.provider}, ${detection.match_type ?? "unknown"} match)`,
-            `Stage: ${detection.stage === "store" ? "before storing (the original may still be on Discord)" : "before re-upload (the stored copy is kept until it expires)"}`,
-            `Server \`${detection.guild_id}\` · channel \`${detection.channel_id}\` · attachment \`${detection.attachment_id}\``,
+            `**${detection.stage === "upload" ? "Upload refused" : "File withheld"}: matched \`${detection.category}\`** (${detection.provider}, ${detection.match_type ?? "unknown"} match${detection.frame ? `, frame ${detection.frame}` : ""})`,
+            `Stage: ${stage}`,
+            where.join(" · "),
             ...Object.entries(detection.context ?? {}).map(([name, value]) => `${name} \`${value}\``),
             `PDQ \`${detection.pdq}\`${detection.reference ? ` · matched entry \`${detection.reference}\`` : ""}`,
-            `Object \`${detection.object}\` · ${detection.time}`,
+            `${detection.object ? `Object \`${detection.object}\` · ` : ""}${detection.time}`,
+            quarantined.id
+                ? `Quarantined as \`${quarantined.id}\`: prepare the NCA report from /admin/safety.`
+                : `**NOT QUARANTINED**: ${quarantined.problem ?? "unknown"}.`,
             "Do not open the file. Follow the abuse and takedown procedure, section 4A.",
         ];
         const body = JSON.stringify({

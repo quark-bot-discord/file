@@ -40,7 +40,8 @@ function primeStream(stream) {
 }
 const sleep = (period) => new Promise((resolve, reject) => setTimeout(resolve, period));
 export { checkMaxAttachmentSize, sortFiles, NoSuchKey, _fetchFile, _downloadFile, FileWithheld, Scanner, };
-export { ArachnidShieldMatcher, scannerFromEnv } from "./scan/index.js";
+export { ArachnidShieldMatcher, scanCredentialsSet, scannerFromEnv, } from "./scan/index.js";
+export { Quarantine, QuarantineNotFound, quarantineFromEnv, reportFieldsOf, } from "./quarantine/index.js";
 /**
  * S3 user-metadata key recording which key derivation an object was written
  * with. Absent means 1.
@@ -183,7 +184,12 @@ export default class FileStorage {
     }
     async downloadFile(url, guild_id, channel_id, attachment_id, premium_tier, file_size, quark_premium, key = null, extendedExpiration = false, 
     /** Identifiers to include if the file is reported, e.g. message_id. */
-    context) {
+    context, 
+    /**
+     * Kept with the file in quarantine if it matches, never sent in the
+     * alert: who posted it, and their relevant data from the two weeks before.
+     */
+    evidence) {
         const maxFileSize = this.checkMaxAttachmentSize(premium_tier);
         if (maxFileSize < file_size)
             throw new Error("File too big");
@@ -203,6 +209,8 @@ export default class FileStorage {
                 (async (body) => {
                     const scanned = await scanner.scanStream(body, file_size, "store");
                     scan.verdict = scanned.verdict;
+                    if (scanned.verdict.status === "match")
+                        scan.file = scanned.file;
                     if (scanned.verdict.status === "match") {
                         scanned.stream.destroy();
                         throw new FileWithheld(scanned.verdict.category, "store");
@@ -245,20 +253,25 @@ export default class FileStorage {
                     }))
                         .catch((markerError) => console.error(`[FILE SCAN] could not write marker ${fileName}: ${markerError.message}`));
                 }
-                scanner.report({
+                void scanner.report({
                     time: new Date().toISOString(),
                     stage: "store",
+                    source: key == null ? "bot" : "assets",
                     provider: verdict.provider,
                     category: verdict.category,
                     match_type: verdict.matchType,
                     pdq: verdict.hash,
+                    frame: verdict.frame,
                     reference: verdict.reference,
                     guild_id: String(guild_id),
                     channel_id: String(channel_id),
                     attachment_id: String(attachment_id),
+                    user_id: context?.user_id,
                     object: fileName,
                     context,
-                });
+                    hashes: verdict.hashes,
+                    frames: verdict.frames,
+                }, { ...evidence, content: scan.file });
             }
             throw error;
         }
@@ -277,7 +290,9 @@ export default class FileStorage {
     }
     async fetchFile(guild_id, channel_id, attachment_id, file_size, quark_premium, key = null, extendedExpiration = false, 
     /** Identifiers to include if the file is reported, e.g. message_id. */
-    context) {
+    context, 
+    /** As for downloadFile. */
+    evidence) {
         const fileName = this.getFileName(attachment_id, channel_id, guild_id, quark_premium, key, extendedExpiration);
         const raw = await this.fetchFileRaw(`${this.s3Url}${this.s3FileBucket}`, fileName);
         // A marker, not a file: it matched when it was downloaded and was never
@@ -339,20 +354,25 @@ export default class FileStorage {
             scanned.stream.destroy();
             // @ts-ignore the Node body is a Readable
             raw.Body.destroy?.();
-            this.scanner.report({
+            void this.scanner.report({
                 time: new Date().toISOString(),
                 stage: "reupload",
+                source: key == null ? "bot" : "assets",
                 provider: verdict.provider,
                 category: verdict.category,
                 match_type: verdict.matchType,
                 pdq: verdict.hash,
+                frame: verdict.frame,
                 reference: verdict.reference,
                 guild_id: String(guild_id),
                 channel_id: String(channel_id),
                 attachment_id: String(attachment_id),
+                user_id: context?.user_id,
                 object: fileName,
                 context,
-            });
+                hashes: verdict.hashes,
+                frames: verdict.frames,
+            }, { ...evidence, content: scanned.file });
             throw new FileWithheld(verdict.category, "reupload");
         }
         if (verdict.status === "error" &&

@@ -97,19 +97,44 @@ const INTERLACED_PNG_MB_PER_MEGAPIXEL = 3.5;
 const DECODE_BUDGET_MB = 150;
 /** libvips' own ceiling, which applies whatever the format. */
 const MAX_PIXELS = 268402689;
+/** Frames hashed from an animation when nothing else is said. */
+export const DEFAULT_MAX_FRAMES = 32;
+/** Which frames of an animation to hash: all of them up to `max`, else `max` spread evenly from first to last. */
+export function framesToHash(pages, max) {
+    const count = Math.max(1, Math.floor(pages));
+    const cap = Math.max(1, Math.floor(max));
+    if (count <= cap)
+        return [...Array(count).keys()];
+    if (cap === 1)
+        return [0];
+    const chosen = new Set();
+    for (let i = 0; i < cap; i++)
+        chosen.add(Math.round((i * (count - 1)) / (cap - 1)));
+    return [...chosen].sort((a, b) => a - b);
+}
 /**
- * PDQ perceptual hash of an image. Only the first frame of an animation is
- * hashed. Throws HasherUnavailable, TooManyPixels, or the decoder's own error
- * if the image cannot be decoded.
+ * PDQ perceptual hash of an image: the first frame only. Throws
+ * HasherUnavailable, TooManyPixels, or the decoder's own error if the image
+ * cannot be decoded.
  */
 export async function pdqHash(image) {
+    const { frames } = await pdqHashFrames(image, 1);
+    return frames[0];
+}
+/**
+ * PDQ hashes of every frame of an animated GIF or WebP, up to `maxFrames`
+ * (spread evenly across the animation past that), or of the one frame of a
+ * still image. Throws as `pdqHash` does.
+ */
+export async function pdqHashFrames(image, maxFrames = DEFAULT_MAX_FRAMES) {
     const sharp = await (loaded ?? (loaded = load()));
-    const { width = 0, height = 0, format = "", isProgressive,
+    const { width = 0, height = 0, format = "", isProgressive, pages = 1,
     // Header only, so safe at any size; the limit is applied just below.
      } = await sharp(image, {
         failOn: "none",
         limitInputPixels: false,
     }).metadata();
+    // `height` is one frame's: each frame is decoded on its own below.
     const megapixels = (width * height) / 1e6;
     const cost = format === "png" && isProgressive
         ? INTERLACED_PNG_MB_PER_MEGAPIXEL
@@ -117,27 +142,37 @@ export async function pdqHash(image) {
     if (width * height > MAX_PIXELS || megapixels * cost > DECODE_BUDGET_MB) {
         throw new TooManyPixels(`${format} ${width}x${height}`);
     }
-    let pipeline = sharp(image, { failOn: "none", sequentialRead: true })
-        .removeAlpha()
-        .toColourspace("srgb");
-    if (width * height > FULL_SIZE_PIXELS) {
-        pipeline = pipeline.resize(SHRUNK_EDGE, SHRUNK_EDGE, {
-            fit: "inside",
-            withoutEnlargement: true,
-        });
+    const animated = pages > 1 && (format === "gif" || format === "webp");
+    const chosen = animated ? framesToHash(pages, maxFrames) : [0];
+    const frames = [];
+    for (const frame of chosen) {
+        let pipeline = sharp(image, {
+            failOn: "none",
+            sequentialRead: true,
+            ...(animated ? { page: frame, pages: 1 } : {}),
+        })
+            .removeAlpha()
+            .toColourspace("srgb");
+        if (width * height > FULL_SIZE_PIXELS) {
+            pipeline = pipeline.resize(SHRUNK_EDGE, SHRUNK_EDGE, {
+                fit: "inside",
+                withoutEnlargement: true,
+            });
+        }
+        const { data, info } = await pipeline
+            .raw()
+            .toBuffer({ resolveWithObject: true });
+        const result = await hashPixels(data, info.width, info.height, info.channels);
+        // pdq-wasm returns the sixteen 16-bit words least significant first.
+        // Every other PDQ tool, and every hash database, has them most
+        // significant first. Sent unreordered, a hash would never match anything.
+        const hash = Buffer.alloc(32);
+        for (let word = 0; word < 16; word++) {
+            hash[word * 2] = result.hash[(15 - word) * 2];
+            hash[word * 2 + 1] = result.hash[(15 - word) * 2 + 1];
+        }
+        frames.push({ hash, quality: result.quality, frame });
     }
-    const { data, info } = await pipeline
-        .raw()
-        .toBuffer({ resolveWithObject: true });
-    const result = await hashPixels(data, info.width, info.height, info.channels);
-    // pdq-wasm returns the sixteen 16-bit words least significant first. Every
-    // other PDQ tool, and every hash database, has them most significant first.
-    // Sent unreordered, a hash would never match anything.
-    const hash = Buffer.alloc(32);
-    for (let word = 0; word < 16; word++) {
-        hash[word * 2] = result.hash[(15 - word) * 2];
-        hash[word * 2 + 1] = result.hash[(15 - word) * 2 + 1];
-    }
-    return { hash, quality: result.quality };
+    return { frames, total: animated ? pages : 1 };
 }
 //# sourceMappingURL=pdq.js.map

@@ -11,7 +11,8 @@ export type WithheldReason =
   | "unchecked"
   | (string & {});
 
-export type ScanStage = "store" | "reupload";
+/** `upload`: a file sent to the dashboard, refused before it is used. */
+export type ScanStage = "store" | "reupload" | "upload";
 
 /** Thrown by downloadFile and fetchFile instead of storing or returning a file. */
 export class FileWithheld extends Error {

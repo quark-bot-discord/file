@@ -14,6 +14,16 @@
       "import": "./dist/src/index.js",
       "require": "./dist/src/index.js",
       "types": "./dist/src/index.d.ts"
+    },
+    "./scan": {
+      "types": "./dist/src/scan/index.d.ts",
+      "import": "./dist/src/scan/index.js",
+      "require": "./dist/src/scan/index.js"
+    },
+    "./quarantine": {
+      "types": "./dist/src/quarantine/index.d.ts",
+      "import": "./dist/src/quarantine/index.js",
+      "require": "./dist/src/quarantine/index.js"
     }
   },
   "author": "Starman",
@@ -45,5 +55,8 @@
     "sinon": "^19.0.2",
     "typescript": "^5.7.3",
     "typescript-eslint": "^8.24.1"
+  },
+  "bin": {
+    "quarantine-open": "dist/src/cli/openExport.js"
   }
 }

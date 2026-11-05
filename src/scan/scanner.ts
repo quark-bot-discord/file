@@ -1,6 +1,12 @@
 import { Readable } from "stream";
-import { HasherUnavailable, pdqHash, TooManyPixels } from "./pdq.js";
-import type { PdqResult } from "./pdq.js";
+import {
+  DEFAULT_MAX_FRAMES,
+  HasherUnavailable,
+  pdqHashFrames,
+  TooManyPixels,
+} from "./pdq.js";
+import type { PdqFrames, PdqResult } from "./pdq.js";
+import type { Quarantine, QuarantineSubject } from "../quarantine/index.js";
 import { isHashableImage, SNIFF_BYTES } from "./sniff.js";
 import type { ScanStage } from "./withheld.js";
 
@@ -20,8 +26,25 @@ export interface Matcher {
 }
 
 export type Verdict =
-  | { status: "clear"; hash: string }
-  | ({ status: "match"; hash: string; provider: string } & Match)
+  | {
+      status: "clear";
+      /** Base64 PDQ hash of the first frame. */
+      hash: string;
+      /** Every frame's hash that was looked up, base64. */
+      hashes?: string[];
+      /** Frames in the file, and how many were hashed. */
+      frames?: { total: number; checked: number };
+    }
+  | ({
+      status: "match";
+      /** Base64 PDQ hash of the frame that matched. */
+      hash: string;
+      provider: string;
+      /** Which frame matched (0 for a still image). */
+      frame?: number;
+      hashes?: string[];
+      frames?: { total: number; checked: number };
+    } & Match)
   /** Nothing to check: not an image, or an image with no features to hash. */
   | { status: "skipped"; reason: string }
   /**
@@ -34,20 +57,52 @@ export type Verdict =
 export interface Detection {
   time: string;
   stage: ScanStage;
+  /** Where it was found: a logged attachment, an asset, a dashboard upload. */
+  source?: "bot" | "assets" | "dashboard";
   provider: string;
   category: string;
   match_type: string | null;
-  /** Base64 PDQ hash of the file. */
+  /** Base64 PDQ hash of the frame that matched. */
   pdq: string;
+  /** Which frame of an animation matched. */
+  frame?: number;
+  /** Every frame hash that was looked up, base64. */
+  hashes?: string[];
+  /** Frames in the file, and how many were checked. */
+  frames?: { total: number; checked: number };
   /** The matcher's identifier for the database entry that matched. */
   reference?: string;
   guild_id: string;
-  channel_id: string;
-  attachment_id: string;
+  channel_id?: string;
+  attachment_id?: string;
+  /** The Discord account that posted or uploaded it, when known. */
+  user_id?: string;
   /** Object name in the bucket (a marker at `store`, the file at `reupload`). */
-  object: string;
+  object?: string;
+  /** The dashboard route an upload came to. */
+  route?: string;
   /** Whatever the caller passed, e.g. message_id and user_id. */
   context?: Record<string, string>;
+}
+
+/**
+ * What goes into quarantine with a detection, besides the detection itself.
+ * None of it is ever sent in the alert.
+ */
+export interface DetectionEvidence {
+  /** The file itself, exactly as it was received. */
+  content?: Buffer;
+  /** Its type, e.g. image/png. */
+  contentType?: string;
+  /** Its name, as the uploader gave it. */
+  fileName?: string;
+  /** Who sent it and from where, as far as the caller knows. */
+  subject?: QuarantineSubject;
+  /**
+   * The relevant data about that person from the two weeks before, as the
+   * caller holds it. Called only on a match. Errors are recorded, not thrown.
+   */
+  relevantData?: () => unknown | Promise<unknown>;
 }
 
 /** A 1x1 PNG. */
@@ -153,6 +208,9 @@ function readAll(
 export class Scanner {
   matcher: Matcher;
   hasher: (image: Buffer) => Promise<PdqResult>;
+  frameHasher: (image: Buffer, maxFrames: number) => Promise<PdqFrames>;
+  maxFrames: number;
+  quarantine?: Quarantine;
   maxBytes: number;
   failClosed: boolean;
   onDetection?: (detection: Detection) => void;
@@ -169,7 +227,10 @@ export class Scanner {
 
   constructor({
     matcher,
-    hasher = pdqHash,
+    hasher,
+    frameHasher,
+    maxFrames = DEFAULT_MAX_FRAMES,
+    quarantine,
     maxBytes = 32 * 1024 * 1024,
     concurrency = 2,
     maxWaiting = 200,
@@ -180,8 +241,17 @@ export class Scanner {
     alertWebhook,
   }: {
     matcher: Matcher;
-    /** Computes the hash. Only replaced in tests. */
+    /** Computes the hash of one frame. Only replaced in tests. */
     hasher?: (image: Buffer) => Promise<PdqResult>;
+    /** Computes the hash of each frame. Only replaced in tests. */
+    frameHasher?: (image: Buffer, maxFrames: number) => Promise<PdqFrames>;
+    /**
+     * Frames of an animated GIF or WebP that are checked. Past this many,
+     * this many are checked, spread evenly from the first to the last.
+     */
+    maxFrames?: number;
+    /** Where a matched file and its data are kept for a report. */
+    quarantine?: Quarantine;
     /** Images larger than this are not read into memory and so not checked. */
     maxBytes?: number;
     /**
@@ -206,7 +276,20 @@ export class Scanner {
     alertWebhook?: string;
   }) {
     this.matcher = matcher;
-    this.hasher = hasher;
+    this.frameHasher =
+      frameHasher ??
+      (hasher
+        ? async (image: Buffer) => ({
+            frames: [{ ...(await hasher(image)), frame: 0 }],
+            total: 1,
+          })
+        : pdqHashFrames);
+    this.hasher =
+      hasher ??
+      (async (image: Buffer) =>
+        (await this.frameHasher(image, 1)).frames[0]);
+    this.maxFrames = maxFrames;
+    this.quarantine = quarantine;
     this.maxBytes = maxBytes;
     this.concurrency = concurrency;
     this.maxWaiting = maxWaiting;
@@ -217,14 +300,17 @@ export class Scanner {
     this.alertWebhook = alertWebhook;
   }
 
-  /** Check one whole file held in memory. Never throws. */
+  /**
+   * Check one whole file held in memory. Every frame of an animation is
+   * checked, up to `maxFrames`. Never throws.
+   */
   async check(file: Buffer): Promise<Verdict> {
     if (!isHashableImage(file))
       return { status: "skipped", reason: "not_image" };
 
-    let pdq;
+    let pdq: PdqFrames;
     try {
-      pdq = await this.hasher(file);
+      pdq = await this.frameHasher(file, this.maxFrames);
     } catch (error) {
       if (error instanceof HasherUnavailable) {
         this.complain(
@@ -238,26 +324,45 @@ export class Scanner {
           error instanceof TooManyPixels ? "too_many_pixels" : "undecodable",
       };
     }
-    if (pdq.quality < MIN_QUALITY)
+    const usable = pdq.frames.filter((f) => f.quality >= MIN_QUALITY);
+    if (usable.length === 0)
       return { status: "skipped", reason: "featureless" };
 
-    const hash = pdq.hash.toString("base64");
-    const cached = this.cache.get(hash);
-    if (cached && cached.expires > Date.now()) return cached.verdict;
+    const frames = { total: pdq.total, checked: pdq.frames.length };
+    const hashes = [...new Set(usable.map((f) => f.hash.toString("base64")))];
 
-    let verdict: Verdict;
+    let results: Verdict[];
     try {
-      const match = await this.matcher.lookup(pdq.hash);
-      verdict = match
-        ? { status: "match", hash, provider: this.matcher.name, ...match }
-        : { status: "clear", hash };
+      results = await Promise.all(
+        hashes.map((hash) => this.lookupOne(Buffer.from(hash, "base64"))),
+      );
     } catch (error) {
       this.complain(`MATCHER UNAVAILABLE: ${(error as Error).message}`);
       return { status: "error", reason: "matcher_unavailable" };
     }
 
+    const matched = results.findIndex((r) => r.status === "match");
+    if (matched !== -1) {
+      const verdict = results[matched] as Extract<Verdict, { status: "match" }>;
+      const frame = usable.find(
+        (f) => f.hash.toString("base64") === verdict.hash,
+      )?.frame;
+      return { ...verdict, frame, hashes, frames };
+    }
+    return { status: "clear", hash: hashes[0], hashes, frames };
+  }
+
+  /** One hash looked up, through the cache. Throws if the matcher fails. */
+  private async lookupOne(hash: Buffer): Promise<Verdict> {
+    const key = hash.toString("base64");
+    const cached = this.cache.get(key);
+    if (cached && cached.expires > Date.now()) return cached.verdict;
+    const match = await this.matcher.lookup(hash);
+    const verdict: Verdict = match
+      ? { status: "match", hash: key, provider: this.matcher.name, ...match }
+      : { status: "clear", hash: key };
     if (this.cache.size >= CACHE_ENTRIES) this.cache.clear();
-    this.cache.set(hash, { verdict, expires: Date.now() + CACHE_MS });
+    this.cache.set(key, { verdict, expires: Date.now() + CACHE_MS });
     return verdict;
   }
 
@@ -271,7 +376,7 @@ export class Scanner {
     source: NodeJS.ReadableStream,
     size: number,
     stage: ScanStage,
-  ): Promise<{ verdict: Verdict; stream: Readable }> {
+  ): Promise<{ verdict: Verdict; stream: Readable; file?: Buffer }> {
     const stream = source as Readable;
     const unread = (verdict: Verdict) => ({ verdict, stream });
 
@@ -299,6 +404,7 @@ export class Scanner {
       return {
         verdict: await this.check(file),
         stream: Readable.from([file], { objectMode: false }),
+        file,
       };
     } finally {
       this.release();
@@ -346,6 +452,10 @@ export class Scanner {
    * rather than as files silently going unchecked.
    */
   async selfTest(): Promise<boolean> {
+    if (!this.quarantine)
+      console.error(
+        "[FILE SCAN] QUARANTINE NOT CONFIGURED (QUARANTINE_BUCKET, QUARANTINE_KEY): matches are withheld and alerted but not kept for a report",
+      );
     try {
       const { hash } = await this.hasher(SELF_TEST_IMAGE);
       await this.matcher.lookup(hash);
@@ -361,40 +471,114 @@ export class Scanner {
     }
   }
   /**
-   * Record a match: a log line, the caller's callback, and the alert webhook.
-   * Identifiers and hashes only. Never the file, never a link to it.
+   * Record a match: a log line, the quarantine, the caller's callback, and the
+   * alert webhook. The alert carries identifiers and hashes only: never the
+   * file, a link to it, or anything about the person beyond their id.
+   *
+   * Resolves with the quarantine id, or undefined when nothing was kept
+   * (no quarantine configured, a repeat, or the write failed: each logged).
+   * Never rejects.
    */
-  report(detection: Detection) {
-    const key = `${detection.guild_id}/${detection.channel_id}/${detection.attachment_id}`;
-    if (this.reported.has(key)) return;
+  async report(
+    detection: Detection,
+    evidence: DetectionEvidence = {},
+  ): Promise<string | undefined> {
+    const key = detection.attachment_id
+      ? `${detection.guild_id}/${detection.channel_id}/${detection.attachment_id}`
+      : `${detection.source}/${detection.guild_id}/${detection.user_id}/${detection.pdq}`;
+    if (this.reported.has(key)) {
+      console.warn(`[FILE SCAN] MATCH (repeat) ${JSON.stringify(detection)}`);
+      return undefined;
+    }
     if (this.reported.size >= CACHE_ENTRIES) this.reported.clear();
     this.reported.add(key);
 
     console.warn(`[FILE SCAN] MATCH ${JSON.stringify(detection)}`);
+
+    let quarantined: { id?: string; problem?: string } = {};
+    if (!this.quarantine) {
+      quarantined = { problem: "no quarantine store is configured" };
+    } else if (!evidence.content) {
+      quarantined = { problem: "the file was not in hand to keep" };
+    } else {
+      try {
+        let relevant: unknown;
+        let relevantError: string | undefined;
+        try {
+          relevant = await evidence.relevantData?.();
+        } catch (error) {
+          relevantError = (error as Error).message;
+        }
+        quarantined.id = await this.quarantine.put({
+          detection,
+          content: evidence.content,
+          contentType: evidence.contentType,
+          fileName: evidence.fileName,
+          subject: evidence.subject ?? {
+            user_id: detection.user_id ?? detection.context?.user_id,
+            guild_id: detection.guild_id,
+            channel_id: detection.channel_id,
+            message_id: detection.context?.message_id,
+            attachment_id: detection.attachment_id,
+          },
+          relevantData: relevant,
+          relevantDataError: relevantError,
+        });
+      } catch (error) {
+        quarantined.problem = `the quarantine write failed: ${(error as Error).message}`;
+        console.error(
+          `[FILE SCAN] NOT QUARANTINED ${quarantined.problem} ${JSON.stringify(detection)}`,
+        );
+      }
+    }
+
     try {
       this.onDetection?.(detection);
     } catch (error) {
       console.error("[FILE SCAN] onDetection failed", error);
     }
     if (this.alertWebhook) {
-      this.alert(detection).catch((error) =>
+      await this.alert(detection, quarantined).catch((error) =>
         console.error(
           `[FILE SCAN] ALERT NOT DELIVERED ${(error as Error).message} ${JSON.stringify(detection)}`,
         ),
       );
+    } else {
+      console.error(
+        `[FILE SCAN] NO ALERT WEBHOOK (FILE_SCAN_ALERT_WEBHOOK) for ${JSON.stringify(detection)}`,
+      );
     }
+    return quarantined.id;
   }
 
-  private async alert(detection: Detection) {
+  private async alert(
+    detection: Detection,
+    quarantined: { id?: string; problem?: string },
+  ) {
+    const stage =
+      detection.stage === "store"
+        ? "before storing (the original may still be on Discord)"
+        : detection.stage === "reupload"
+          ? "before re-upload (the stored copy is kept until it expires)"
+          : `refused at upload on the dashboard${detection.route ? ` (${detection.route})` : ""}`;
+    const where = [
+      `Server \`${detection.guild_id}\``,
+      detection.channel_id && `channel \`${detection.channel_id}\``,
+      detection.attachment_id && `attachment \`${detection.attachment_id}\``,
+      detection.user_id && `user \`${detection.user_id}\``,
+    ].filter(Boolean);
     const lines = [
-      `**File withheld: matched \`${detection.category}\`** (${detection.provider}, ${detection.match_type ?? "unknown"} match)`,
-      `Stage: ${detection.stage === "store" ? "before storing (the original may still be on Discord)" : "before re-upload (the stored copy is kept until it expires)"}`,
-      `Server \`${detection.guild_id}\` · channel \`${detection.channel_id}\` · attachment \`${detection.attachment_id}\``,
+      `**${detection.stage === "upload" ? "Upload refused" : "File withheld"}: matched \`${detection.category}\`** (${detection.provider}, ${detection.match_type ?? "unknown"} match${detection.frame ? `, frame ${detection.frame}` : ""})`,
+      `Stage: ${stage}`,
+      where.join(" · "),
       ...Object.entries(detection.context ?? {}).map(
         ([name, value]) => `${name} \`${value}\``,
       ),
       `PDQ \`${detection.pdq}\`${detection.reference ? ` · matched entry \`${detection.reference}\`` : ""}`,
-      `Object \`${detection.object}\` · ${detection.time}`,
+      `${detection.object ? `Object \`${detection.object}\` · ` : ""}${detection.time}`,
+      quarantined.id
+        ? `Quarantined as \`${quarantined.id}\`: prepare the NCA report from /admin/safety.`
+        : `**NOT QUARANTINED**: ${quarantined.problem ?? "unknown"}.`,
       "Do not open the file. Follow the abuse and takedown procedure, section 4A.",
     ];
     const body = JSON.stringify({

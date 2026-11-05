@@ -731,3 +731,59 @@ test("the alert carries identifiers and hashes, and no link to the file", async 
   assert.match(content, /message_id `555`/);
   assert.ok(!content.includes("http"), "no link of any kind");
 });
+
+// ------------------------------------------------- quarantine from the bot
+
+/** A quarantine stand-in that records what it is given. */
+function fakeQuarantine() {
+  const kept = [];
+  return {
+    kept,
+    async put(input) {
+      kept.push(input);
+      return `q${kept.length}-000000000000`;
+    },
+  };
+}
+
+test("a match at download or re-upload puts the file and the poster's data in quarantine", async () => {
+  const store = new Map();
+  const quarantine = fakeQuarantine();
+  const { fs } = storage(store, { quarantine });
+  const file = await png(640, 480, 17);
+  known.set((await pdqHash(file)).hash.toString("base64"), "csam");
+  const a = attachment(file);
+
+  const evidence = {
+    subject: { user_id: "777", username: "poster", guild_id: "1", message_id: "555" },
+    relevantData: () => ({ message: { content: "hello" } }),
+  };
+  await assert.rejects(
+    fs.downloadFile(...withContext(a.download), evidence),
+    FileWithheld,
+  );
+  // report() runs after the throw; let it finish.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(quarantine.kept.length, 1);
+  const [input] = quarantine.kept;
+  assert.deepEqual(input.content, file, "the file as received");
+  assert.equal(input.detection.stage, "store");
+  assert.equal(input.detection.source, "bot");
+  assert.equal(input.detection.user_id, "777");
+  assert.equal(input.subject.username, "poster");
+  assert.deepEqual(input.relevantData, { message: { content: "hello" } });
+
+  // Stored clear, matched later: quarantined at re-upload with the decrypted file.
+  const store2 = new Map();
+  const file2 = await png(640, 480, 19);
+  const b = attachment(file2);
+  await storage(store2).fs.downloadFile(...b.download);
+  known.set((await pdqHash(file2)).hash.toString("base64"), "csam");
+  const quarantine2 = fakeQuarantine();
+  const { fs: reading } = storage(store2, { quarantine: quarantine2 });
+  await assert.rejects(reading.fetchFile(...withContext(b.fetch), evidence), FileWithheld);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(quarantine2.kept.length, 1);
+  assert.deepEqual(quarantine2.kept[0].content, file2);
+  assert.equal(quarantine2.kept[0].detection.stage, "reupload");
+});
