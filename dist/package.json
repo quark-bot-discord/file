@@ -24,6 +24,11 @@
             "types": "./dist/src/quarantine/index.d.ts",
             "import": "./dist/src/quarantine/index.js",
             "require": "./dist/src/quarantine/index.js"
+        },
+        "./objects": {
+            "types": "./dist/src/objects/index.d.ts",
+            "import": "./dist/src/objects/index.js",
+            "require": "./dist/src/objects/index.js"
         }
     },
     "author": "Starman",

@@ -547,3 +547,19 @@ test("the start-up self-test logs one line: LIVE, or NOT LIVE with the reason", 
   assert.match(lines[0], /^\[FILE SCAN\] LIVE in website: hashing works and test-matcher accepted the credentials/);
   assert.match(lines[1], /^\[FILE SCAN\] NOT LIVE in serverlog, images cannot be checked: Arachnid Shield answered 401/);
 });
+
+test("the object store for log avatars puts and gets, and is off when not configured", async () => {
+  const { ObjectStore, objectStoreFromEnv } = await import("../dist/src/objects/index.js");
+  assert.equal(objectStoreFromEnv("LOG_AVATAR", {}), undefined);
+  const client = memoryBucket();
+  const realSend = client.send;
+  client.send = async (command) => {
+    const answer = await realSend(command);
+    if (answer.Body) answer.Body = { transformToByteArray: async () => answer.Body };
+    return answer;
+  };
+  const store = new ObjectStore(client, "avatars");
+  await store.put("log-avatars/1/abc.png", Buffer.from("png"), "image/png");
+  assert.equal((await store.get("log-avatars/1/abc.png")).toString(), "png");
+  assert.equal(await store.get("log-avatars/1/none.png"), null);
+});
