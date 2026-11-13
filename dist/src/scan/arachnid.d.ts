@@ -1,7 +1,7 @@
 import type { Match, Matcher } from "./scanner.js";
 /**
  * Looks PDQ hashes up in Project Arachnid Shield (Canadian Centre for Child
- * Protection). Only the hash is sent: `POST /v1/pdq/` with
+ * Protection). Only the hash is sent: `POST /v1/pdq` with
  * `{ "hashes": [<base64>, ...] }`. The file never leaves this process.
  *
  * Lookups made within `batchWindowMs` of each other share one request.

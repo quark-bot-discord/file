@@ -477,6 +477,14 @@ export class Scanner {
     else this.active--;
   }
 
+  /**
+   * Say why a file that never passed a check is being withheld because this
+   * check could not run either (at most once a minute, like the others).
+   */
+  noteUnchecked(reason: string) {
+    this.complain(`WITHHELD UNCHECKED: the check could not run (${reason})`);
+  }
+
   /** A loud log line, at most once a minute. */
   private complain(message: string) {
     if (Date.now() - this.lastComplaint < 60_000) return;

@@ -175,17 +175,20 @@ before(async () => {
           ? {
               classification,
               match_type: "near",
-              near_match_details: {
-                sha1_base32: "X",
-                sha256_hex: "ABC123",
-                classification,
-                timestamp: 0,
-              },
+              // The spec's shape: a list of NearMatchDetail.
+              near_match_details: [
+                {
+                  sha1_base32: "X",
+                  sha256_hex: "ABC123",
+                  classification,
+                  timestamp: 0,
+                },
+              ],
             }
           : {
               classification: "no-known-match",
               match_type: null,
-              near_match_details: null,
+              near_match_details: [],
             };
       }
       res.setHeader("content-type", "application/json");
@@ -239,18 +242,20 @@ test("the matcher sends hashes only, batched, with basic auth", async () => {
     details: {
       classification: "csam",
       match_type: "near",
-      near_match_details: {
-        sha1_base32: "X",
-        sha256_hex: "ABC123",
-        classification: "csam",
-        timestamp: 0,
-      },
+      near_match_details: [
+        {
+          sha1_base32: "X",
+          sha256_hex: "ABC123",
+          classification: "csam",
+          timestamp: 0,
+        },
+      ],
     },
   });
   assert.equal(shieldRequests.length, 1);
   const [request] = shieldRequests;
   assert.equal(request.method, "POST");
-  assert.equal(request.url, "/v1/pdq/");
+  assert.equal(request.url, "/v1/pdq");
   assert.equal(
     request.authorization,
     "Basic " + Buffer.from("user:pass").toString("base64"),
@@ -797,4 +802,25 @@ test("a match at download or re-upload puts the file and the poster's data in qu
   assert.equal(quarantine2.kept.length, 1);
   assert.deepEqual(quarantine2.kept[0].content, file2);
   assert.equal(quarantine2.kept[0].detection.stage, "reupload");
+});
+
+test("Arachnid Shield: the address in its own client, and a failed connection says why", async () => {
+  const matcher = new ArachnidShieldMatcher({ username: "u", password: "p" });
+  assert.equal(matcher["url"], "https://shield.projectarachnid.com/v1/pdq");
+
+  // A port that was free a moment ago: nothing is listening on it.
+  const probe = http.createServer();
+  await new Promise((resolve) => probe.listen(0, "127.0.0.1", resolve));
+  const { port } = probe.address();
+  await new Promise((resolve) => probe.close(resolve));
+  const unreachable = new ArachnidShieldMatcher({
+    username: "u",
+    password: "p",
+    baseUrl: `http://127.0.0.1:${port}/`,
+    batchWindowMs: 0,
+  });
+  await assert.rejects(unreachable.lookup(Buffer.alloc(32, 1)), (error) => {
+    assert.equal(error.message, `could not reach 127.0.0.1:${port}: fetch failed (ECONNREFUSED)`);
+    return true;
+  });
 });
