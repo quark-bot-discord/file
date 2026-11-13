@@ -190,6 +190,11 @@ export declare class Scanner {
     }>;
     private acquire;
     private release;
+    /**
+     * Say why a file that never passed a check is being withheld because this
+     * check could not run either (at most once a minute, like the others).
+     */
+    noteUnchecked(reason: string): void;
     /** A loud log line, at most once a minute. */
     private complain;
     /**

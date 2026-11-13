@@ -1,7 +1,7 @@
 import type { Match, Matcher } from "./scanner.js";
 
-/** The address in Arachnid Shield's own client. */
-const DEFAULT_BASE_URL = "https://shield.projectarachnid.ca/";
+/** The address in Arachnid Shield's own client and API spec. */
+const DEFAULT_BASE_URL = "https://shield.projectarachnid.com/";
 const NO_MATCH = "no-known-match";
 
 interface Pending {
@@ -11,7 +11,7 @@ interface Pending {
 
 /**
  * Looks PDQ hashes up in Project Arachnid Shield (Canadian Centre for Child
- * Protection). Only the hash is sent: `POST /v1/pdq/` with
+ * Protection). Only the hash is sent: `POST /v1/pdq` with
  * `{ "hashes": [<base64>, ...] }`. The file never leaves this process.
  *
  * Lookups made within `batchWindowMs` of each other share one request.
@@ -41,7 +41,7 @@ export class ArachnidShieldMatcher implements Matcher {
     batchWindowMs?: number;
     batchSize?: number;
   }) {
-    this.url = new URL("/v1/pdq/", baseUrl).toString();
+    this.url = new URL("/v1/pdq", baseUrl).toString();
     this.authorization =
       "Basic " + Buffer.from(`${username}:${password}`).toString("base64");
     this.timeoutMs = timeoutMs;
@@ -84,7 +84,10 @@ export class ArachnidShieldMatcher implements Matcher {
               : {
                   category: entry.classification,
                   matchType: entry.match_type ?? null,
-                  reference: entry.near_match_details?.sha256_hex,
+                  // A list, one entry per known file it is near.
+                  reference: Array.isArray(entry.near_match_details)
+                    ? entry.near_match_details[0]?.sha256_hex
+                    : undefined,
                   details: entry,
                 };
           waiting.forEach((w) => w.resolve(match));
@@ -98,15 +101,27 @@ export class ArachnidShieldMatcher implements Matcher {
   }
 
   private async send(hashes: string[]): Promise<Record<string, any>> {
-    const res = await fetch(this.url, {
-      method: "POST",
-      headers: {
-        Authorization: this.authorization,
-        "Content-Type": "application/json; charset=utf-8",
-      },
-      body: JSON.stringify({ hashes }),
-      signal: AbortSignal.timeout(this.timeoutMs),
-    });
+    let res: Response;
+    try {
+      res = await fetch(this.url, {
+        method: "POST",
+        headers: {
+          Authorization: this.authorization,
+          "Content-Type": "application/json; charset=utf-8",
+        },
+        body: JSON.stringify({ hashes }),
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+    } catch (error) {
+      // Node's fetch says only "fetch failed"; the reason (DNS, refused,
+      // TLS, timeout) is on its cause.
+      const cause = (error as { cause?: { code?: string; message?: string } })
+        .cause;
+      const why = cause?.code ?? cause?.message;
+      throw new Error(
+        `could not reach ${new URL(this.url).host}: ${(error as Error).message}${why ? ` (${why})` : ""}`,
+      );
+    }
     if (!res.ok) throw new Error(`Arachnid Shield answered ${res.status}`);
     const body = (await res.json()) as { scanned_hashes?: Record<string, any> };
     if (

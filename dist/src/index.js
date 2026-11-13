@@ -383,6 +383,7 @@ export default class FileStorage {
             scanned.stream.destroy();
             // @ts-ignore the Node body is a Readable
             raw.Body.destroy?.();
+            this.scanner.noteUnchecked(verdict.reason);
             throw new FileWithheld("unchecked", "reupload");
         }
         return {
