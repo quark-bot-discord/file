@@ -322,6 +322,146 @@ test("the report fields carry Schedule 1's items in order, and say what is not h
   assert.equal(typeof reportFieldsOf, "function");
 });
 
+test("the report links the message and the profile, and the upload page for a dashboard upload", async () => {
+  const { quarantine } = storeAt({ t: Date.parse("2026-11-05T10:00:00Z") });
+  const bot = await quarantine.put({
+    detection: detection({ stage: "store", source: "bot", channel_id: "706552170241064982", attachment_id: "2" }),
+    content: Buffer.from("x"),
+    subject: { user_id: "254307281023172608", guild_id: "706552170241064981", message_id: "706552170241064983" },
+  });
+  const fields = await quarantine.reportFields(bot, "admin:1");
+  assert.equal(
+    fields["6_when_and_where"].url,
+    "https://discord.com/channels/706552170241064981/706552170241064982/706552170241064983",
+  );
+  assert.equal(fields["3_user"].profile_url, "https://discord.com/users/254307281023172608");
+
+  const upload = await quarantine.put({
+    detection: detection(),
+    content: Buffer.from("x"),
+    subject: { user_id: "254307281023172608", route: "/dashboard/706552170241064981/bot-profile" },
+  });
+  assert.equal(
+    (await quarantine.reportFields(upload, "admin:1"))["6_when_and_where"].url,
+    "https://quark.bot/dashboard/706552170241064981/bot-profile",
+  );
+
+  const noMessage = await quarantine.put({
+    detection: detection({ stage: "store", source: "bot", user_id: undefined }),
+    content: Buffer.from("x"),
+    subject: {},
+  });
+  const bare = await quarantine.reportFields(noMessage, "admin:1");
+  assert.equal(bare["6_when_and_where"].url, null);
+  assert.equal(bare["3_user"].profile_url, null);
+});
+
+test("a report says it relates to an earlier one about the same user or the same image", async () => {
+  const clock = { t: Date.parse("2026-11-05T10:00:00Z") };
+  const { quarantine } = storeAt(clock);
+  const first = await quarantine.put({
+    detection: detection({ pdq: Buffer.alloc(32, 7).toString("base64") }),
+    content: Buffer.from("a"),
+    subject: { user_id: "254307281023172608" },
+  });
+  clock.t += 3600_000;
+  await quarantine.recordReport(first, { reference: "NCA-1", reportedAt: new Date(clock.t).toISOString() }, "admin:1");
+  const sameImage = await quarantine.put({
+    detection: detection({ pdq: Buffer.alloc(32, 9).toString("base64"), user_id: "300000000000000001" }),
+    content: Buffer.from("b"),
+    subject: { user_id: "300000000000000001" },
+  });
+  clock.t += 3600_000;
+  await quarantine.recordReport(sameImage, { reference: "NCA-2", reportedAt: new Date(clock.t).toISOString() }, "admin:1");
+  const unrelated = await quarantine.put({
+    detection: detection({ pdq: Buffer.alloc(32, 3).toString("base64"), user_id: "300000000000000002" }),
+    content: Buffer.from("c"),
+    subject: { user_id: "300000000000000002" },
+  });
+  await quarantine.recordReport(unrelated, { reference: "NCA-3", reportedAt: new Date(clock.t).toISOString() }, "admin:1");
+
+  // Same user as the first, same image as the second.
+  const now = await quarantine.put({
+    detection: detection({ pdq: Buffer.alloc(32, 9).toString("base64") }),
+    content: Buffer.from("d"),
+    subject: { user_id: "254307281023172608" },
+  });
+  const previous = (await quarantine.reportFields(now, "admin:1"))["8_previous_reports"];
+  assert.equal(previous.relates_to_previous_report, true);
+  assert.deepEqual(
+    previous.reports.map((r) => [r.reference, r.relates_by]),
+    [["NCA-1", "same user"], ["NCA-2", "same image"]],
+  );
+
+  // The unrelated report relates to nothing earlier.
+  const alone = await quarantine.reportFields(unrelated, "admin:1");
+  assert.deepEqual(alone["8_previous_reports"], { relates_to_previous_report: false, reports: [] });
+
+  // A reference outlives its item, and still matches by the user it kept.
+  clock.t += 400 * 86400_000;
+  await quarantine.sweep();
+  const later = await quarantine.put({
+    detection: detection({ pdq: Buffer.alloc(32, 5).toString("base64") }),
+    content: Buffer.from("e"),
+    subject: { user_id: "254307281023172608" },
+  });
+  assert.deepEqual(
+    (await quarantine.reportFields(later, "admin:1"))["8_previous_reports"].reports.map((r) => r.reference),
+    ["NCA-1"],
+  );
+
+});
+
+test("the report carries the file's EXIF, or says there is none", async () => {
+  const { quarantine } = storeAt({ t: Date.parse("2026-11-05T10:00:00Z") });
+  const withExif = await sharp(pattern(32, 32, 2), { raw: { width: 32, height: 32, channels: 3 } })
+    .jpeg()
+    .withExif({ IFD0: { Make: "TestCam", Model: "Model 1" } })
+    .toBuffer();
+  const id = await quarantine.put({ detection: detection(), content: withExif, subject: {} });
+  const fields = await quarantine.reportFields(id, "admin:1");
+  assert.equal(fields["4_content"].exif.tags.Make, "TestCam");
+  assert.equal(fields["4_content"].exif.tags.Model, "Model 1");
+  assert.ok(fields["4_content"].exif.raw_base64.length > 0);
+  assert.ok(!fields.not_available.some((line) => line.startsWith("EXIF")));
+
+  const plain = await sharp(pattern(32, 32, 2), { raw: { width: 32, height: 32, channels: 3 } }).png().toBuffer();
+  const bare = await quarantine.put({ detection: detection(), content: plain, subject: {} });
+  const none = await quarantine.reportFields(bare, "admin:1");
+  assert.deepEqual(none["4_content"].exif, { tags: null, raw_base64: null });
+  assert.ok(none.not_available.includes("EXIF data: none in the file"));
+});
+
+test("billing records from the app go in the report, and decide what is said to be not held", async () => {
+  const { quarantine } = storeAt({ t: Date.parse("2026-11-05T10:00:00Z") });
+  const id = await quarantine.put({ detection: detection(), content: Buffer.from("x"), subject: { user_id: "254307281023172608" } });
+
+  const unchecked = await quarantine.reportFields(id, "admin:1");
+  assert.equal(unchecked["3_user"].billing, null);
+  assert.ok(unchecked.not_available.includes("Billing details: not checked"));
+
+  const never = await quarantine.reportFields(id, "admin:1", { billing: [] });
+  assert.deepEqual(never["3_user"].billing, []);
+  assert.ok(never.not_available.some((line) => line.startsWith("Billing name, address, email and phone: the user has never paid")));
+
+  const record = {
+    source: "Stripe customer cus_1",
+    name: "A Person",
+    email: "a@example.com",
+    phone: null,
+    address: { line1: "1 Street", city: "Town", postal_code: "AB1 2CD", country: "GB" },
+    payment_methods: [{ type: "card", name: "A Person", email: null, phone: null, address: null }],
+  };
+  const paid = await quarantine.reportFields(id, "admin:1", { billing: [record] });
+  assert.deepEqual(paid["3_user"].billing, [record]);
+  assert.ok(!paid.not_available.some((line) => line.startsWith("Email")));
+  assert.ok(paid.not_available.includes("Telephone number: not on the user's billing records"));
+
+  const down = await quarantine.reportFields(id, "admin:1", { billingError: "Stripe did not answer" });
+  assert.equal(down["3_user"].billing, null);
+  assert.ok(down.not_available.includes("Billing details: could not be checked (Stripe did not answer)"));
+});
+
 test("priority: one of three levels, recorded, logged, and in the report", async () => {
   const { client, quarantine } = storeAt({ t: Date.now() });
   const id = await quarantine.put({ detection: detection(), content: Buffer.from("x"), subject: {} });

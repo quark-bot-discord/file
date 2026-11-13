@@ -81,6 +81,8 @@ export interface QuarantineReference {
     detected_at: string;
     category: string;
     pdq: string;
+    /** Who it was about, so a later report can say it relates to this one. */
+    user_id?: string;
     expires_at: string;
     hold?: QuarantineRecord["hold"];
 }
@@ -160,7 +162,7 @@ export declare class Quarantine {
      * The fields a report needs (Schedule 1, "where available"), as one
      * object. Logged as an export.
      */
-    reportFields(id: string, actor: string): Promise<{
+    reportFields(id: string, actor: string, app?: AppReportData): Promise<{
         "1_reporting_service": {
             name: string;
             description: string;
@@ -176,10 +178,12 @@ export declare class Quarantine {
             discord_user_id: string | null;
             username: string | null;
             display_name: string | null;
+            profile_url: string | null;
             account_created_at: string | null;
             ip_address: string | null;
             ip_address_time: string | null;
             user_agent: string | null;
+            billing: BillingRecord[] | null;
         };
         "4_content": {
             description: string;
@@ -187,6 +191,7 @@ export declare class Quarantine {
             file_name: string | null;
             size_bytes: number;
             sha256: string;
+            exif: ExifResult | null;
             held: string;
         };
         "5_how_detected": {
@@ -209,6 +214,7 @@ export declare class Quarantine {
             posted_or_uploaded_at: string;
             detected_at: string;
             where: string;
+            url: string | null;
             discord_server_id: string;
             discord_server_name: string | null;
             discord_channel_id: string | null;
@@ -220,6 +226,10 @@ export declare class Quarantine {
             at_match_error: string | null;
             added_since: Record<string, unknown>;
         };
+        "8_previous_reports": {
+            relates_to_previous_report: boolean;
+            reports: PreviousReport[];
+        };
         not_available: string[];
         quarantine_id: string;
         report: {
@@ -229,6 +239,19 @@ export declare class Quarantine {
             recorded_at: string;
         } | null;
     }>;
+    /**
+     * Everything the report's fields are made from that is not in the record:
+     * earlier reports about the same user or image, and the file's EXIF.
+     */
+    private fieldsFor;
+    /**
+     * Reports already sent that this one relates to (Schedule 1: "whether it
+     * relates to a previous report"): the same Discord user, or the same image
+     * by its PDQ hash. Read from the kept references, which outlive their
+     * items. References made before `user_id` was kept match by image only,
+     * unless their item is still here to say who it was about.
+     */
+    previousReports(item: QuarantineRecord): Promise<PreviousReport[]>;
     /**
      * The file, sealed again under a new one-off key, for handing to the NCA.
      * The stored copy and its key never leave; the one-off key is returned once
@@ -263,13 +286,66 @@ export declare class Quarantine {
         accessEntries: number;
     }>;
 }
+/** What an app adds to the report that the quarantine does not hold. */
+export interface AppReportData {
+    /**
+     * The user's billing records with the app (Schedule 1, item 4: name,
+     * address and date of birth from billing details, email, phone), one per
+     * customer record. `[]` when the app looked and found none; left out when
+     * it did not look.
+     */
+    billing?: BillingRecord[];
+    /** Set when the app could not look, e.g. the payment provider was down. */
+    billingError?: string;
+}
+export interface BillingRecord {
+    /** Where it is held, e.g. "Stripe customer cus_123". */
+    source: string;
+    name?: string | null;
+    email?: string | null;
+    phone?: string | null;
+    address?: Record<string, string | null> | null;
+    /** Names and addresses on payment methods, which may differ. */
+    payment_methods?: {
+        type: string;
+        name?: string | null;
+        email?: string | null;
+        phone?: string | null;
+        address?: Record<string, string | null> | null;
+    }[];
+    created_at?: string;
+}
+export interface PreviousReport {
+    reference: string;
+    reported_at: string;
+    quarantine_id: string;
+    relates_by: "same user" | "same image" | "same user and image";
+}
+export type ExifResult = {
+    tags: Record<string, unknown> | null;
+    raw_base64: string | null;
+} | {
+    error: string;
+};
+/**
+ * The file's EXIF (Schedule 1: "linked exif data"): readable tags, GPS
+ * included, and the raw block so nothing is lost in reading it. Discord
+ * strips some of it from uploads, so `tags: null` is a normal answer.
+ */
+export declare function exifOf(content: Buffer): Promise<ExifResult>;
 /**
  * The report's fields from an item: Schedule 1, "where available", in the
  * order the report is made (reporter, urgency, the user, the content and how
  * it was found, where and when, the relevant data). What Quark does not hold
  * is named under `not_available` rather than left out silently.
+ *
+ * `extra` is what is not in the record: earlier reports and the EXIF (read
+ * by the store), and billing records (from the app, which holds them).
  */
-export declare function reportFieldsOf(item: QuarantineRecord | QuarantineItem): {
+export declare function reportFieldsOf(item: QuarantineRecord | QuarantineItem, extra?: AppReportData & {
+    previousReports?: PreviousReport[];
+    exif?: ExifResult;
+}): {
     "1_reporting_service": {
         name: string;
         description: string;
@@ -285,10 +361,12 @@ export declare function reportFieldsOf(item: QuarantineRecord | QuarantineItem):
         discord_user_id: string | null;
         username: string | null;
         display_name: string | null;
+        profile_url: string | null;
         account_created_at: string | null;
         ip_address: string | null;
         ip_address_time: string | null;
         user_agent: string | null;
+        billing: BillingRecord[] | null;
     };
     "4_content": {
         description: string;
@@ -296,6 +374,7 @@ export declare function reportFieldsOf(item: QuarantineRecord | QuarantineItem):
         file_name: string | null;
         size_bytes: number;
         sha256: string;
+        exif: ExifResult | null;
         held: string;
     };
     "5_how_detected": {
@@ -318,6 +397,7 @@ export declare function reportFieldsOf(item: QuarantineRecord | QuarantineItem):
         posted_or_uploaded_at: string;
         detected_at: string;
         where: string;
+        url: string | null;
         discord_server_id: string;
         discord_server_name: string | null;
         discord_channel_id: string | null;
@@ -328,6 +408,10 @@ export declare function reportFieldsOf(item: QuarantineRecord | QuarantineItem):
         at_match: {} | null;
         at_match_error: string | null;
         added_since: Record<string, unknown>;
+    };
+    "8_previous_reports": {
+        relates_to_previous_report: boolean;
+        reports: PreviousReport[];
     };
     not_available: string[];
     quarantine_id: string;

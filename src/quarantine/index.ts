@@ -48,6 +48,8 @@ import {
   PutObjectCommand,
   S3Client,
 } from "@aws-sdk/client-s3";
+import exifr from "exifr";
+import sharp from "sharp";
 import type { Detection } from "../scan/scanner.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -133,6 +135,8 @@ export interface QuarantineReference {
   detected_at: string;
   category: string;
   pdq: string;
+  /** Who it was about, so a later report can say it relates to this one. */
+  user_id?: string;
   expires_at: string;
   hold?: QuarantineRecord["hold"];
 }
@@ -509,10 +513,62 @@ export class Quarantine {
    * The fields a report needs (Schedule 1, "where available"), as one
    * object. Logged as an export.
    */
-  async reportFields(id: string, actor: string) {
+  async reportFields(id: string, actor: string, app: AppReportData = {}) {
     const item = await this.readItem(id);
+    const fields = await this.fieldsFor(item, app);
     await this.logAccess({ actor, action: "export_fields", id });
-    return reportFieldsOf(item);
+    return fields;
+  }
+
+  /**
+   * Everything the report's fields are made from that is not in the record:
+   * earlier reports about the same user or image, and the file's EXIF.
+   */
+  private async fieldsFor(item: QuarantineItem, app: AppReportData = {}) {
+    const content = await this.getSealed(`items/${item.id}/content`);
+    return reportFieldsOf(item, {
+      ...app,
+      previousReports: await this.previousReports(item),
+      exif: content ? await exifOf(content) : { error: "the file is not held" },
+    });
+  }
+
+  /**
+   * Reports already sent that this one relates to (Schedule 1: "whether it
+   * relates to a previous report"): the same Discord user, or the same image
+   * by its PDQ hash. Read from the kept references, which outlive their
+   * items. References made before `user_id` was kept match by image only,
+   * unless their item is still here to say who it was about.
+   */
+  async previousReports(item: QuarantineRecord): Promise<PreviousReport[]> {
+    const userId = item.subject.user_id ?? item.detection.user_id;
+    const out: PreviousReport[] = [];
+    for (const name of await this.listNames("references/")) {
+      const plain = await this.getSealed(name);
+      if (!plain) continue;
+      const kept = JSON.parse(plain.toString("utf8")) as QuarantineReference;
+      if (kept.id === item.id) continue;
+      let keptUser = kept.user_id;
+      if (!keptUser) {
+        try {
+          const other = await this.readRecord(kept.id);
+          keptUser = other.subject.user_id ?? other.detection.user_id;
+        } catch (error) {
+          if (!(error instanceof QuarantineNotFound)) throw error;
+        }
+      }
+      const sameUser = !!userId && keptUser === userId;
+      const sameImage = kept.pdq === item.detection.pdq;
+      if (!sameUser && !sameImage) continue;
+      out.push({
+        reference: kept.reference,
+        reported_at: kept.reported_at,
+        quarantine_id: kept.id,
+        relates_by:
+          sameUser && sameImage ? "same user and image" : sameUser ? "same user" : "same image",
+      });
+    }
+    return out.sort((a, b) => a.reported_at.localeCompare(b.reported_at));
   }
 
   /**
@@ -581,11 +637,12 @@ export class Quarantine {
       detected_at: record.detected_at,
       category: record.detection.category,
       pdq: record.detection.pdq,
+      user_id: record.subject.user_id ?? record.detection.user_id,
       expires_at: addDays(reportedIso, REFERENCE_RETENTION_DAYS),
     };
     kept.hold = record.hold;
     const asSubmitted =
-      submitted ?? reportFieldsOf(await this.readItem(id));
+      submitted ?? (await this.fieldsFor(await this.readItem(id)));
     await this.putSealed(
       `items/${id}/submitted`,
       Buffer.from(
@@ -684,15 +741,140 @@ const PRIORITY_TEXT: Record<Priority, string> = {
   other: "Report without undue delay",
 };
 
+/** What an app adds to the report that the quarantine does not hold. */
+export interface AppReportData {
+  /**
+   * The user's billing records with the app (Schedule 1, item 4: name,
+   * address and date of birth from billing details, email, phone), one per
+   * customer record. `[]` when the app looked and found none; left out when
+   * it did not look.
+   */
+  billing?: BillingRecord[];
+  /** Set when the app could not look, e.g. the payment provider was down. */
+  billingError?: string;
+}
+
+export interface BillingRecord {
+  /** Where it is held, e.g. "Stripe customer cus_123". */
+  source: string;
+  name?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  address?: Record<string, string | null> | null;
+  /** Names and addresses on payment methods, which may differ. */
+  payment_methods?: {
+    type: string;
+    name?: string | null;
+    email?: string | null;
+    phone?: string | null;
+    address?: Record<string, string | null> | null;
+  }[];
+  created_at?: string;
+}
+
+export interface PreviousReport {
+  reference: string;
+  reported_at: string;
+  quarantine_id: string;
+  relates_by: "same user" | "same image" | "same user and image";
+}
+
+export type ExifResult =
+  | { tags: Record<string, unknown> | null; raw_base64: string | null }
+  | { error: string };
+
+/**
+ * The file's EXIF (Schedule 1: "linked exif data"): readable tags, GPS
+ * included, and the raw block so nothing is lost in reading it. Discord
+ * strips some of it from uploads, so `tags: null` is a normal answer.
+ */
+export async function exifOf(content: Buffer): Promise<ExifResult> {
+  let raw: Buffer | undefined;
+  try {
+    raw = (await sharp(content, { animated: false }).metadata()).exif;
+  } catch {
+    // Not an image sharp reads; exifr may still find a block.
+  }
+  try {
+    const tags = (await exifr.parse(content, {
+      tiff: true,
+      exif: true,
+      gps: true,
+      ifd1: false,
+      interop: false,
+      xmp: false,
+      icc: false,
+      iptc: false,
+      jfif: false,
+      ihdr: false,
+      makerNote: false,
+      userComment: true,
+      translateValues: true,
+      reviveValues: true,
+    })) as Record<string, unknown> | undefined;
+    return {
+      tags: tags && Object.keys(tags).length ? jsonSafe(tags) : null,
+      raw_base64: raw?.length ? raw.toString("base64") : null,
+    };
+  } catch (error) {
+    return raw?.length
+      ? { tags: null, raw_base64: raw.toString("base64") }
+      : { error: `could not be read: ${(error as Error).message}` };
+  }
+}
+
+/** Dates as ISO strings, bytes as base64, so the tags survive JSON. */
+function jsonSafe(value: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, v] of Object.entries(value)) {
+    if (v instanceof Date) out[key] = Number.isNaN(v.getTime()) ? null : v.toISOString();
+    else if (v instanceof Uint8Array) out[key] = Buffer.from(v).toString("base64");
+    else out[key] = v;
+  }
+  return out;
+}
+
+const SNOWFLAKE = /^\d{17,20}$/;
+
+/** The Discord link to the message the file was posted in, when all three ids are known. */
+function messageUrl(guild?: string, channel?: string, message?: string) {
+  return guild && channel && message && [guild, channel, message].every((id) => SNOWFLAKE.test(id))
+    ? `https://discord.com/channels/${guild}/${channel}/${message}`
+    : null;
+}
+
+/** The quark.bot address a dashboard upload was sent to. */
+function uploadUrl(route?: string) {
+  return route && route.startsWith("/") ? `https://quark.bot${route}` : null;
+}
+
 /**
  * The report's fields from an item: Schedule 1, "where available", in the
  * order the report is made (reporter, urgency, the user, the content and how
  * it was found, where and when, the relevant data). What Quark does not hold
  * is named under `not_available` rather than left out silently.
+ *
+ * `extra` is what is not in the record: earlier reports and the EXIF (read
+ * by the store), and billing records (from the app, which holds them).
  */
-export function reportFieldsOf(item: QuarantineRecord | QuarantineItem) {
+export function reportFieldsOf(
+  item: QuarantineRecord | QuarantineItem,
+  extra: AppReportData & {
+    previousReports?: PreviousReport[];
+    exif?: ExifResult;
+  } = {},
+) {
   const s = item.subject;
   const d = item.detection;
+  const userId = s.user_id ?? d.user_id;
+  const guildId = s.guild_id ?? d.guild_id;
+  const channelId = s.channel_id ?? d.channel_id;
+  const billing = extra.billing;
+  const billingHas = (key: "email" | "phone" | "name" | "address") =>
+    !!billing?.some(
+      (b) => b[key] || b.payment_methods?.some((m) => m[key]),
+    );
+
   const notAvailable: string[] = [];
   if (!s.ip)
     notAvailable.push(
@@ -701,12 +883,32 @@ export function reportFieldsOf(item: QuarantineRecord | QuarantineItem) {
         : "IP address: not available. Discord does not give bots the IP address of the person who posted",
     );
   notAvailable.push(
-    "Email address and phone number: Quark does not receive them from Discord",
+    "Port number: not recorded",
+    "Registration and login IP addresses: not held. Quark keeps only a one-way hash of the addresses used to sign in to its dashboard",
+    "Date of birth: not held",
   );
-  if (!s.user_id) notAvailable.push("Discord account: not known for this file");
+  if (extra.billingError)
+    notAvailable.push(`Billing details: could not be checked (${extra.billingError})`);
+  else if (billing === undefined)
+    notAvailable.push("Billing details: not checked");
+  else if (!billing.length)
+    notAvailable.push(
+      "Billing name, address, email and phone: the user has never paid Quark. Discord does not give bots email addresses or phone numbers",
+    );
+  else {
+    if (!billingHas("email"))
+      notAvailable.push("Email address: not on the user's billing records");
+    if (!billingHas("phone"))
+      notAvailable.push("Telephone number: not on the user's billing records");
+  }
+  if (!userId) notAvailable.push("Discord account: not known for this file");
   if (!s.guild_name) notAvailable.push("Server name: not known at the time");
+  if (extra.exif && "tags" in extra.exif && !extra.exif.tags && !extra.exif.raw_base64)
+    notAvailable.push("EXIF data: none in the file");
+
   const parts =
     "relevant_data_parts" in item ? item.relevant_data_parts : {};
+  const previous = extra.previousReports ?? [];
   return {
     "1_reporting_service": {
       name: "Quark",
@@ -717,13 +919,15 @@ export function reportFieldsOf(item: QuarantineRecord | QuarantineItem) {
       ? { level: item.priority.level, meaning: PRIORITY_TEXT[item.priority.level] }
       : { level: null, meaning: "Not chosen yet" },
     "3_user": {
-      discord_user_id: s.user_id ?? null,
+      discord_user_id: userId ?? null,
       username: s.username ?? null,
       display_name: s.display_name ?? null,
-      account_created_at: snowflakeTime(s.user_id) ?? null,
+      profile_url: userId && SNOWFLAKE.test(userId) ? `https://discord.com/users/${userId}` : null,
+      account_created_at: snowflakeTime(userId) ?? null,
       ip_address: s.ip ?? null,
       ip_address_time: s.ip ? d.time : null,
       user_agent: s.user_agent ?? null,
+      billing: extra.billingError ? null : (billing ?? null),
     },
     "4_content": {
       description:
@@ -732,6 +936,7 @@ export function reportFieldsOf(item: QuarantineRecord | QuarantineItem) {
       file_name: item.content.name ?? null,
       size_bytes: item.content.bytes,
       sha256: item.content.sha256,
+      exif: extra.exif ?? null,
       held: "Kept encrypted in Quark's restricted store; the file is handed over separately.",
     },
     "5_how_detected": {
@@ -757,9 +962,13 @@ export function reportFieldsOf(item: QuarantineRecord | QuarantineItem) {
           : d.stage === "store"
             ? "Attachment posted in a Discord server, checked when Quark stored it for its logs"
             : "Attachment stored by Quark, checked before Quark re-posted it in a log",
-      discord_server_id: s.guild_id ?? d.guild_id ?? null,
+      url:
+        d.stage === "upload"
+          ? uploadUrl(s.route)
+          : messageUrl(guildId, channelId, s.message_id),
+      discord_server_id: guildId ?? null,
       discord_server_name: s.guild_name ?? null,
-      discord_channel_id: s.channel_id ?? d.channel_id ?? null,
+      discord_channel_id: channelId ?? null,
       discord_message_id: s.message_id ?? null,
       discord_attachment_id: s.attachment_id ?? d.attachment_id ?? null,
     },
@@ -767,6 +976,10 @@ export function reportFieldsOf(item: QuarantineRecord | QuarantineItem) {
       at_match: item.relevant_data ?? null,
       at_match_error: item.relevant_data_error ?? null,
       added_since: parts,
+    },
+    "8_previous_reports": {
+      relates_to_previous_report: previous.length > 0,
+      reports: previous,
     },
     not_available: notAvailable,
     quarantine_id: item.id,
