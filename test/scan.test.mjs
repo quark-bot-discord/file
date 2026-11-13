@@ -13,6 +13,14 @@ import { Readable, Writable } from "node:stream";
 import sharp from "sharp";
 import { S3Client } from "@aws-sdk/client-s3";
 
+/** Metadata without the size every stored copy now records (`sz`). */
+const meta = (m) => {
+  if (!m) return undefined;
+  const { sz, ...rest } = m;
+  return Object.keys(rest).length ? rest : undefined;
+};
+
+
 // Everything sent to S3 directly (lifecycle rule, marker objects) lands here.
 const sent = [];
 S3Client.prototype.send = async (command) => {
@@ -374,7 +382,7 @@ test("a clear image is stored, marked clear, and comes back byte for byte", asyn
 
   await fs.downloadFile(...a.download);
   const [object] = [...store.values()];
-  assert.deepEqual(object.Metadata, { scan: "clear" });
+  assert.deepEqual(meta(object.Metadata), { scan: "clear" });
 
   const fetched = await fs.fetchFile(...a.fetch);
   assert.deepEqual(await read(fetched.stream), file);
@@ -389,7 +397,7 @@ test("a file that is not an image is stored and returned untouched, and nothing 
   const a = attachment(file);
 
   await fs.downloadFile(...a.download);
-  assert.equal([...store.values()][0].Metadata, undefined);
+  assert.equal(meta([...store.values()][0].Metadata), undefined);
   const fetched = await fs.fetchFile(...a.fetch);
   assert.deepEqual(await read(fetched.stream), file);
   assert.equal(shieldRequests.length, 0);
@@ -413,7 +421,7 @@ test("a match at download is never stored: a marker is left, it is reported, and
   const objects = [...store.values()];
   assert.equal(objects.length, 1);
   assert.equal(objects[0].body.length, 0, "no file bytes stored");
-  assert.deepEqual(objects[0].Metadata, { withheld: "csam" });
+  assert.deepEqual(meta(objects[0].Metadata), { withheld: "csam" });
 
   assert.equal(detections.length, 1);
   const [d] = detections;
@@ -489,7 +497,7 @@ test("matcher down at download: the file is stored without a clear mark", async 
   shieldMode = "down";
   await fs.downloadFile(...a.download);
   shieldMode = "ok";
-  assert.equal([...store.values()][0].Metadata, undefined);
+  assert.equal(meta([...store.values()][0].Metadata), undefined);
 });
 
 test("matcher down at re-upload: withheld as unchecked unless it passed when stored", async () => {
@@ -545,7 +553,7 @@ test("an image that cannot be checked is stored unmarked and withheld at re-uplo
     const { fs } = storage(store, options);
     const a = attachment(file);
     await fs.downloadFile(...a.download);
-    assert.equal([...store.values()][0].Metadata, undefined, name);
+    assert.equal(meta([...store.values()][0].Metadata), undefined, name);
     await assert.rejects(fs.fetchFile(...a.fetch), (error) => {
       assert.ok(error instanceof FileWithheld, name);
       assert.equal(error.reason, "unchecked", name);
@@ -679,7 +687,7 @@ test("with no scanner nothing changes", async () => {
   const file = await png(640, 480, 11); // the one the matcher knows as csam
   const a = attachment(file);
   await fs.downloadFile(...a.download);
-  assert.equal([...store.values()][0].Metadata, undefined);
+  assert.equal(meta([...store.values()][0].Metadata), undefined);
   assert.deepEqual(await read((await fs.fetchFile(...a.fetch)).stream), file);
 });
 
