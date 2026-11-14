@@ -25,6 +25,11 @@
             "import": "./dist/src/quarantine/index.js",
             "require": "./dist/src/quarantine/index.js"
         },
+        "./attachments": {
+            "types": "./dist/src/attachments/index.d.ts",
+            "import": "./dist/src/attachments/index.js",
+            "require": "./dist/src/attachments/index.js"
+        },
         "./objects": {
             "types": "./dist/src/objects/index.d.ts",
             "import": "./dist/src/objects/index.js",

@@ -467,6 +467,9 @@ export default class FileStorage {
 
     const metadata: Record<string, string> = {};
     if (keyVersion === 2) metadata[KEY_VERSION_METADATA] = "2";
+    // The key derivation needs the original size; kept so an admin can
+    // read the copy back for the quarantine (`file/attachments`).
+    metadata.sz = String(file_size);
     if (scan.verdict?.status === "clear") metadata[SCAN_METADATA] = "clear";
 
     const { writeStream, promise } = this.uploadStream({

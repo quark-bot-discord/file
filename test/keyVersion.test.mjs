@@ -10,6 +10,14 @@ import { randomBytes } from "node:crypto";
 import { Readable, Writable } from "node:stream";
 import { S3Client } from "@aws-sdk/client-s3";
 
+/** Metadata without the size every stored copy now records (`sz`). */
+const meta = (m) => {
+  if (!m) return undefined;
+  const { sz, ...rest } = m;
+  return Object.keys(rest).length ? rest : undefined;
+};
+
+
 // The constructor sends a lifecycle rule to the bucket; there is no bucket here.
 S3Client.prototype.send = async () => ({});
 
@@ -89,7 +97,7 @@ test("no secret: version 1, no metadata, round trips", async () => {
   const fs = storage(store);
   await save(fs);
   const [object] = [...store.values()];
-  assert.equal(object.Metadata, undefined);
+  assert.deepEqual(object.Metadata, { sz: String(original.length) });
   assert.deepEqual(await read((await load(fs)).stream), original);
 });
 
@@ -100,7 +108,7 @@ test("secret: version 2 is marked, round trips, and differs from version 1", asy
   const fs = storage(v2, "secret-a");
   await save(fs);
   const [name] = [...v2.keys()];
-  assert.deepEqual(v2.get(name).Metadata, { kv: "2" });
+  assert.deepEqual(v2.get(name).Metadata, { kv: "2", sz: String(original.length) });
   assert.equal([...v1.keys()][0], name, "object name must not change");
   assert.notDeepEqual(v2.get(name).body, v1.get(name).body);
   assert.deepEqual(await read((await load(fs)).stream), original);
@@ -141,7 +149,7 @@ test("env var is the fallback for the option", async () => {
   process.env.FILE_ENCRYPTION_SECRET = "from-env";
   const store = new Map();
   await save(storage(store));
-  assert.deepEqual([...store.values()][0].Metadata, { kv: "2" });
+  assert.deepEqual(meta([...store.values()][0].Metadata), { kv: "2" });
   delete process.env.FILE_ENCRYPTION_SECRET;
 });
 
@@ -149,7 +157,7 @@ test("keyed objects (assets) stay on version 1 even with a secret", async () => 
   const store = new Map();
   const fs = storage(store, "secret-a");
   await save(fs, "mavatar", true);
-  assert.equal([...store.values()][0].Metadata, undefined);
+  assert.equal(meta([...store.values()][0].Metadata), undefined);
   // asset-storage-node hands out keys with the 4-argument call:
   const legacy = fs.getEncryptionKeys(ids[0], ids[1], ids[2], ids[3]);
   const plain = storage(new Map()).getEncryptionKeys(
@@ -163,4 +171,41 @@ test("keyed objects (assets) stay on version 1 even with a secret", async () => 
     await read((await load(fs, "mavatar", true)).stream),
     original,
   );
+});
+
+test("file/attachments: finds, reads back (with and without the recorded size) and deletes a stored copy", async () => {
+  const { AttachmentStore, storedNames, attachmentFromUrl } = await import("../dist/src/attachments/index.js");
+  const store = new Map();
+  await save(storage(store, "secret-b"));
+  const client = {
+    async send(command) {
+      const { Key } = command.input;
+      const object = store.get(Key);
+      const kind = command.constructor.name;
+      if (kind === "DeleteObjectCommand") { store.delete(Key); return {}; }
+      if (!object) throw Object.assign(new Error("NotFound"), { name: "NotFound" });
+      if (kind === "HeadObjectCommand") return { Metadata: object.Metadata };
+      return { Body: Readable.from([object.body]), Metadata: object.Metadata };
+    },
+  };
+  const ref = { guildId: ids[0], channelId: ids[1], attachmentId: ids[2] };
+  assert.equal(storedNames(ref).length, 4);
+  assert.deepEqual(attachmentFromUrl("https://cdn.discordapp.com/attachments/123456789012345678/223456789012345678/a.png?x=1"), {
+    channelId: "123456789012345678", attachmentId: "223456789012345678",
+  });
+  const files = new AttachmentStore(client, "b", "secret-b");
+  const [found] = await files.find(ref);
+  assert.equal(found.size, original.length);
+  assert.equal(found.keyVersion, 2);
+  const read1 = await files.read(ref);
+  assert.deepEqual(read1.bytes, original);
+  // An older copy, without the size: the wrong one is tried first, then the right one.
+  const name = [...store.keys()][0];
+  store.get(name).Metadata = { kv: "2" };
+  assert.equal((await files.read(ref)).bytes, null);
+  assert.deepEqual((await files.read(ref, [12345, original.length])).bytes, original);
+  // Without the secret a version 2 copy cannot be opened.
+  assert.equal((await new AttachmentStore(client, "b", undefined).read(ref, [original.length])).bytes, null);
+  assert.deepEqual(await files.delete(ref), [name]);
+  assert.deepEqual(await files.find(ref), []);
 });
