@@ -33,6 +33,8 @@
  *                         tickets for a bot match)
  *   items/<id>/submitted  sealed JSON: the report as submitted to the NCA
  *   references/<id>       sealed JSON: QuarantineReference
+ *   settings/nca-api-key  sealed JSON: NcaApiKeyRecord, the NCA API key
+ *                         entered on the admin page (it lasts six months)
  *   access/<yyyy>/<mm>/<time>-<rand>.json   plain JSON: AccessEntry
  */
 import {
@@ -209,10 +211,32 @@ export interface AccessEntry {
     | "submit_nca"
     | "submit_nca_failed"
     | "set_auto_report"
-    | "delete_unreported";
+    | "delete_unreported"
+    | "set_nca_api_key";
   id?: string;
   detail?: string;
 }
+
+/** The NCA API key as entered on the admin page. Never sent back to a page. */
+export interface NcaApiKeyRecord {
+  api_key: string;
+  set_at: string;
+  set_by: string;
+  /** When the NCA says the key stops working (they last six months). */
+  expires_at: string;
+  /** Reminders already sent, in days before expiry (0 = expired). */
+  reminded: number[];
+}
+
+/** What a page may see of the stored key. */
+export interface NcaApiKeyStatus {
+  set_at: string;
+  set_by: string;
+  expires_at: string;
+  last4: string;
+}
+
+const NCA_KEY_OBJECT = "settings/nca-api-key";
 
 export interface PutInput {
   detection: Detection;
@@ -389,6 +413,58 @@ export class Quarantine {
     }
     await this.logAccess({ actor, action: "read", detail: "access log" });
     return entries;
+  }
+
+  /* ---------------- NCA API key ---------------- */
+
+  /**
+   * Store a new NCA API key, replacing the old one. Logged, without the key.
+   */
+  async setNcaApiKey(apiKey: string, expiresAt: Date, actor: string) {
+    const key = apiKey.trim();
+    if (!key || key.length > 1000 || /\s/.test(key))
+      throw new Error("That does not look like an API key");
+    if (Number.isNaN(expiresAt.getTime()) || expiresAt <= this.now())
+      throw new Error("The expiry date must be in the future");
+    const record: NcaApiKeyRecord = {
+      api_key: key,
+      set_at: this.now().toISOString(),
+      set_by: actor,
+      expires_at: expiresAt.toISOString(),
+      reminded: [],
+    };
+    await this.logAccess({
+      actor,
+      action: "set_nca_api_key",
+      detail: `ending ${key.slice(-4)}, expires ${record.expires_at.slice(0, 10)}`,
+    });
+    await this.putSealed(NCA_KEY_OBJECT, Buffer.from(JSON.stringify(record)));
+    return statusOf(record);
+  }
+
+  /** The stored key, for sending reports. Null if none was entered. */
+  async ncaApiKey(): Promise<NcaApiKeyRecord | null> {
+    const plain = await this.getSealed(NCA_KEY_OBJECT);
+    return plain ? (JSON.parse(plain.toString("utf8")) as NcaApiKeyRecord) : null;
+  }
+
+  /** When and by whom the key was set, its expiry and last four characters. */
+  async ncaApiKeyStatus(): Promise<NcaApiKeyStatus | null> {
+    const record = await this.ncaApiKey();
+    return record ? statusOf(record) : null;
+  }
+
+  /**
+   * Note that the reminder for `days` before expiry was sent, so it is sent
+   * once. False if the key changed since `setAt` or it was already sent.
+   */
+  async markNcaKeyReminder(setAt: string, days: number): Promise<boolean> {
+    const record = await this.ncaApiKey();
+    if (!record || record.set_at !== setAt || record.reminded.includes(days))
+      return false;
+    record.reminded.push(days);
+    await this.putSealed(NCA_KEY_OBJECT, Buffer.from(JSON.stringify(record)));
+    return true;
   }
 
   /* ---------------- items ---------------- */
@@ -1211,4 +1287,13 @@ export function quarantineFromEnv(
     key,
   });
 }
+function statusOf(record: NcaApiKeyRecord): NcaApiKeyStatus {
+  return {
+    set_at: record.set_at,
+    set_by: record.set_by,
+    expires_at: record.expires_at,
+    last4: record.api_key.slice(-4),
+  };
+}
+
 export * from "./nca.js";
