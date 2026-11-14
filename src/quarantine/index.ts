@@ -51,6 +51,13 @@ import {
 import exifr from "exifr";
 import sharp from "sharp";
 import type { Detection } from "../scan/scanner.js";
+import {
+  ncaPayload,
+  NcaError,
+  submitReferral,
+  type NcaConfig,
+  type NcaResult,
+} from "./nca.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** reg 8: content, report, basis and relevant data. */
@@ -114,7 +121,48 @@ export interface QuarantineRecord {
     reported_at: string;
     recorded_by: string;
     recorded_at: string;
+    /** Set when it went through the API: the NCA's own ids. */
+    via_api?: { referral_id: string; report_id?: number };
   };
+  /** How it came to Quark when not from the image check. */
+  intake?: Intake;
+  /** Automatic reporting to the NCA (`autoReportBlocker`). */
+  nca?: {
+    /** Set by an admin: do not report automatically, and why. */
+    paused?: { reason: string; set_by: string; set_at: string };
+    attempts?: number;
+    last_attempt_at?: string;
+    /** The last failure. `permanent`: the API refused the report itself. */
+    error?: { message: string; permanent: boolean; at: string };
+    /** Another report already covers this file (same attachment). */
+    covered_by?: string;
+  };
+}
+
+/** Routes a report can come to Quark by, other than the image check. */
+export const INTAKE_ROUTES = [
+  "email",
+  "legal_report_form",
+  "support_server",
+  "discord",
+  "police",
+  "regulator",
+  "other_org",
+] as const;
+export type IntakeRoute = (typeof INTAKE_ROUTES)[number];
+
+export interface Intake {
+  route: IntakeRoute;
+  /** Who reported it, as they gave it (a name, an address, "anonymous"). */
+  reporter?: string;
+  /** Their reference, e.g. a police case number. */
+  reference?: string;
+  /** One neutral sentence: what was alleged. */
+  summary?: string;
+  recorded_by: string;
+  recorded_at: string;
+  /** Report to the NCA without waiting for an admin. */
+  auto_report: boolean;
 }
 
 /** What is listed on the admin page: everything but the relevant data. */
@@ -156,19 +204,25 @@ export interface AccessEntry {
     | "set_hold"
     | "add_relevant_data"
     | "expire"
-    | "expire_reference";
+    | "expire_reference"
+    | "intake"
+    | "submit_nca"
+    | "submit_nca_failed"
+    | "set_auto_report";
   id?: string;
   detail?: string;
 }
 
 export interface PutInput {
   detection: Detection;
-  content: Buffer;
+  /** The file; null for a report with no file Quark still holds. */
+  content: Buffer | null;
   contentType?: string;
   fileName?: string;
   subject: QuarantineSubject;
   relevantData?: unknown;
   relevantDataError?: string;
+  intake?: Intake;
 }
 
 /** The part of an S3 client this needs; tests pass a map. */
@@ -350,27 +404,31 @@ export class Quarantine {
       source: input.detection.source ?? "unknown",
       detection: input.detection,
       content: {
-        stored: true,
-        bytes: input.content.length,
-        sha256: createHash("sha256").update(input.content).digest("hex"),
+        stored: !!input.content,
+        bytes: input.content?.length ?? 0,
+        sha256: input.content ? createHash("sha256").update(input.content).digest("hex") : "",
         type: input.contentType,
         name: input.fileName,
       },
       subject: input.subject,
       relevant_data: input.relevantData,
       relevant_data_error: input.relevantDataError,
+      intake: input.intake,
       expires_at: addDays(detectedAt, RETENTION_DAYS),
     };
     // Content first: a record never points at content that was not written.
-    await this.putSealed(`items/${id}/content`, input.content);
+    if (input.content) await this.putSealed(`items/${id}/content`, input.content);
     await this.putSealed(
       `items/${id}/record`,
       Buffer.from(JSON.stringify(record)),
     );
     await this.logAccess({
-      actor: `system:${record.source}`,
-      action: "write",
+      actor: input.intake ? input.intake.recorded_by : `system:${record.source}`,
+      action: input.intake ? "intake" : "write",
       id,
+      detail: input.intake
+        ? `${input.intake.route}${input.detection.guild_id ? ` guild ${input.detection.guild_id}` : ""}`
+        : `${input.detection.category}${input.detection.guild_id ? ` guild ${input.detection.guild_id}` : ""}`,
     });
     return id;
   }
@@ -572,26 +630,107 @@ export class Quarantine {
   }
 
   /**
-   * The file, sealed again under a new one-off key, for handing to the NCA.
-   * The stored copy and its key never leave; the one-off key is returned once
-   * and is not kept anywhere.
+   * Stop (reason) or allow (null) automatic reporting of one item. A report
+   * an admin submits by hand is not affected.
    */
-  async exportContent(
+  async setAutoReport(id: string, pausedReason: string | null, actor: string) {
+    const record = await this.readRecord(id);
+    const clean = pausedReason?.trim() ?? "";
+    if (pausedReason !== null && (!clean || clean.length > 500))
+      throw new Error("The reason must be 1 to 500 characters");
+    record.nca = {
+      ...record.nca,
+      paused: pausedReason === null ? undefined : { reason: clean, set_by: actor, set_at: this.now().toISOString() },
+    };
+    await this.writeRecord(record);
+    await this.logAccess({ actor, action: "set_auto_report", id, detail: pausedReason === null ? "allowed" : `paused: ${clean}` });
+    return record;
+  }
+
+  /**
+   * Why an item is not reported automatically, or null when it should be.
+   * `others` are the other items, to find one that already covers the same
+   * file (the same attachment matched when stored and again before re-upload).
+   */
+  autoReportBlocker(record: QuarantineSummary, others: QuarantineSummary[] = []): string | null {
+    if (record.report) return "already reported";
+    if (record.nca?.paused) return `paused: ${record.nca.paused.reason}`;
+    if (record.nca?.error?.permanent) return `the NCA refused it: ${record.nca.error.message}`;
+    if (record.intake && !record.intake.auto_report) return "recorded for a decision by hand";
+    if (!record.intake && record.detection.category !== "csam")
+      return `classified ${record.detection.category}: decide by hand whether it is reportable`;
+    const attachment = record.subject.attachment_id ?? record.detection.attachment_id;
+    if (attachment) {
+      const earlier = others.find(
+        (o) =>
+          o.id !== record.id &&
+          (o.subject.attachment_id ?? o.detection.attachment_id) === attachment &&
+          (o.report || o.detected_at < record.detected_at),
+      );
+      if (earlier) return `same file as ${earlier.id}`;
+    }
+    return null;
+  }
+
+  /**
+   * Report one item to the NCA through the API: the fields, a JSON document
+   * with everything else held, and the file itself, sent from here. The
+   * reference is then recorded as for any report. Throws `NcaError`; a 400
+   * is kept on the item so it is not tried again automatically.
+   */
+  async submitToNca(
     id: string,
     actor: string,
-  ): Promise<{ sealed: Buffer; key: string; sha256: string; name: string }> {
+    config: NcaConfig,
+    app: AppReportData = {},
+  ): Promise<{ record: QuarantineRecord; result: NcaResult }> {
     const record = await this.readRecord(id);
-    const content = await this.getSealed(`items/${id}/content`);
-    if (!content) throw new QuarantineNotFound(id);
-    const oneOff = randomBytes(32);
-    const name = `quarantine-${id}.bin`;
-    await this.logAccess({ actor, action: "export_content", id });
-    return {
-      sealed: seal(oneOff, name, content),
-      key: oneOff.toString("base64"),
-      sha256: record.content.sha256,
-      name,
-    };
+    if (record.report) throw new Error(`Already reported (${record.report.reference})`);
+    const item = await this.readItem(id);
+    const fields = await this.fieldsFor(item, app);
+    const payload = ncaPayload(item, fields, config);
+    const files: { name: string; type: string; bytes: Buffer }[] = [];
+    if (record.content.stored) {
+      const content = await this.getSealed(`items/${id}/content`);
+      if (content)
+        files.push({
+          name: record.content.name || `quarantine-${id}`,
+          type: record.content.type || "application/octet-stream",
+          bytes: content,
+        });
+    }
+    files.push({
+      name: "quark-report.json",
+      type: "application/json",
+      bytes: Buffer.from(JSON.stringify(fields, null, 2)),
+    });
+    const at = this.now().toISOString();
+    record.nca = { ...record.nca, attempts: (record.nca?.attempts ?? 0) + 1, last_attempt_at: at };
+    let result: NcaResult;
+    try {
+      result = await submitReferral(config, payload, files);
+    } catch (error) {
+      const permanent = error instanceof NcaError && error.permanent;
+      const message = (error as Error)?.message?.slice(0, 500) ?? String(error);
+      record.nca.error = { message, permanent, at };
+      await this.writeRecord(record);
+      await this.logAccess({ actor, action: "submit_nca_failed", id, detail: message.slice(0, 200) });
+      throw error;
+    }
+    record.nca.error = undefined;
+    await this.writeRecord(record);
+    await this.logAccess({ actor, action: "submit_nca", id, detail: result.referralFriendlyID });
+    const reported = await this.recordReport(
+      id,
+      {
+        reference: result.referralFriendlyID,
+        reportedAt: at,
+        submitted: { via: "api", payload, fields, files: files.map((f) => ({ name: f.name, bytes: f.bytes.length })) },
+        viaApi: { referral_id: result.referralID, report_id: result.reportID },
+      },
+      actor,
+    );
+    return { record: reported, result };
   }
 
   /**
@@ -604,11 +743,13 @@ export class Quarantine {
       reference,
       reportedAt,
       submitted,
+      viaApi,
     }: {
       reference: string;
       reportedAt: string;
       /** The report as submitted; the fields as they stand when not given. */
       submitted?: unknown;
+      viaApi?: { referral_id: string; report_id?: number };
     },
     actor: string,
   ): Promise<QuarantineRecord> {
@@ -625,6 +766,7 @@ export class Quarantine {
       reported_at: reportedIso,
       recorded_by: actor,
       recorded_at: this.now().toISOString(),
+      ...(viaApi ? { via_api: viaApi } : {}),
     };
     record.expires_at = later(
       record.expires_at,
@@ -1030,8 +1172,4 @@ export function quarantineFromEnv(
     key,
   });
 }
-
-/** Open a file exported by `exportContent`, given its one-off key. */
-export function openExport(sealed: Buffer, key: string, name: string): Buffer {
-  return unseal(Buffer.from(key, "base64"), name, sealed);
-}
+export * from "./nca.js";

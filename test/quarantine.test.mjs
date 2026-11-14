@@ -16,7 +16,6 @@ const {
   reportFieldsOf,
   seal,
   unseal,
-  openExport,
   parseKey,
 } = await import("../dist/src/quarantine/index.js");
 const { Scanner, framesToHash, pdqHashFrames, scanCredentialsSet, scannerFromEnv } =
@@ -269,15 +268,9 @@ test("a report reference must be given, and dated in the past", async () => {
   );
 });
 
-test("the export hands the file over sealed under a one-off key, and logs it", async () => {
-  const { client, quarantine } = storeAt({ t: Date.now() });
-  const content = Buffer.from("test bytes standing in for the file");
-  const id = await quarantine.put({ detection: detection(), content, subject: {} });
-  const exported = await quarantine.exportContent(id, "admin:1");
-  assert.ok(!exported.sealed.includes(content));
-  assert.deepEqual(openExport(exported.sealed, exported.key, exported.name), content);
-  assert.notEqual(exported.key, KEY.toString("base64"));
-  assert.ok(accessActions(client).includes("export_content"));
+test("there is no way to export the file: it only ever goes to the NCA through the API", async () => {
+  const { quarantine } = storeAt({ t: Date.now() });
+  assert.equal(quarantine.exportContent, undefined);
 });
 
 test("the report fields carry Schedule 1's items in order, and say what is not held", async () => {
@@ -528,13 +521,13 @@ test("every access is logged, append-only, with who, what and when", async () =>
   await quarantine.list("admin:1");
   await quarantine.get(id, "admin:1");
   await quarantine.reportFields(id, "admin:2");
-  await quarantine.exportContent(id, "admin:2");
+  await quarantine.setPriority(id, "other", "admin:2");
   const names = [...client.objects.keys()].filter((k) => k.startsWith("access/"));
   assert.equal(names.length, 5, "one object per access, none overwritten");
   const entries = names.map((n) => JSON.parse(client.objects.get(n).toString()));
   assert.deepEqual(
     entries.map((e) => [e.actor, e.action]).sort(),
-    [["admin:1", "list"], ["admin:1", "read"], ["admin:2", "export_content"], ["admin:2", "export_fields"], ["system:dashboard", "write"]].sort(),
+    [["admin:1", "list"], ["admin:1", "read"], ["admin:2", "export_fields"], ["admin:2", "set_priority"], ["system:dashboard", "write"]].sort(),
   );
   for (const e of entries) assert.match(e.time, /^2026-11-05T/);
   const log = await quarantine.accessLog("admin:1");
@@ -706,4 +699,109 @@ test("the object store for log avatars puts, gets and deletes, and is off when n
   assert.equal(await store.delete("log-avatars/1/abc.png"), true);
   assert.equal(await store.get("log-avatars/1/abc.png"), null);
   assert.equal(await store.delete("log-avatars/1/abc.png"), false);
+});
+
+// ---------------------------------------------------------------- NCA API
+
+const NCA = {
+  apiKey: "k",
+  orgId: "989d7cc4-60f4-42bf-b65b-843c4ee09e5a",
+  baseUrl: "https://nca.test/submission",
+  espName: "Quark Bot Limited",
+  reporter: { firstName: "A", lastName: "B", email: "a@b.test", phone: "", phoneCountryCode: "+44" },
+};
+
+function ncaFetch(answer) {
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    const form = init.body;
+    calls.push({
+      url,
+      headers: init.headers,
+      submission: JSON.parse(await form.get("submission").text()),
+      files: form.getAll("uploadedFiles").map((f) => ({ name: f.name, size: f.size })),
+    });
+    return typeof answer === "function" ? answer() : answer;
+  };
+  return { calls, fetchImpl };
+}
+
+const ok = () =>
+  new Response(JSON.stringify({ success: true, referralID: "f6dec685-7474-41b5-9f05-f39e970e4b3a", referralFriendlyID: "SR-CSEAIRP-1257", reportID: 12345 }), { status: 201 });
+
+test("NCA: a match is submitted with the file from the store, and the reference recorded", async () => {
+  const { client, quarantine } = storeAt({ t: Date.parse("2026-11-05T10:05:00Z") });
+  const content = Buffer.from("test bytes standing in for the file");
+  const id = await quarantine.put({
+    detection: detection({ stage: "store", source: "bot", category: "csam", channel_id: "706552170241064982", attachment_id: "706552170241064983", user_id: "301655085954367492" }),
+    content,
+    contentType: "image/png",
+    fileName: "a.png",
+    subject: { guild_id: "706552170241064981", message_id: "706552170241064984", username: "someone" },
+  });
+  const { calls, fetchImpl } = ncaFetch(ok);
+  const { record, result } = await quarantine.submitToNca(id, "system:auto-report", { ...NCA, fetchImpl }, { billing: [] });
+  assert.equal(result.referralFriendlyID, "SR-CSEAIRP-1257");
+  assert.equal(record.report.reference, "SR-CSEAIRP-1257");
+  assert.equal(record.report.via_api.referral_id, "f6dec685-7474-41b5-9f05-f39e970e4b3a");
+  const [call] = calls;
+  assert.equal(call.url, "https://nca.test/submission/api/referral/");
+  assert.equal(call.headers["X-API-KEY"], "k");
+  assert.equal(call.headers.orgId, NCA.orgId);
+  assert.deepEqual(call.files, [{ name: "a.png", size: content.length }, { name: "quark-report.json", size: call.files[1].size }]);
+  const sub = call.submission;
+  assert.equal(sub.priorityId, "3");
+  assert.equal(sub.reportedInformation.incidentSummary.espEscalation, "Priority 3 - other");
+  assert.equal(sub.reportedInformation.incidentSummary.methodOfDetection, "An automated detection tool");
+  assert.equal(sub.reportedInformation.reportedPeople.reportedPerson[0].espUserId, "301655085954367492");
+  assert.equal(sub.reportedInformation.uploadedFiles.uploadedFile[0].links.link[0].href, "https://discord.com/channels/706552170241064981/706552170241064982/706552170241064984");
+  assert.match(sub.reportedInformation.uploadedFiles.uploadedFile[0].originalFileHashes.originalFileHash[0].value, /^SHA-256: /);
+  assert.ok(accessActions(client).includes("submit_nca"));
+  await assert.rejects(quarantine.submitToNca(id, "admin:1", { ...NCA, fetchImpl }), /Already reported/);
+});
+
+test("NCA: a 400 is kept on the item and stops automatic reporting; a 5xx does not", async () => {
+  const { quarantine } = storeAt({ t: Date.parse("2026-11-05T10:05:00Z") });
+  const id = await quarantine.put({ detection: detection({ category: "csam" }), content: Buffer.from("x"), subject: {} });
+  const down = ncaFetch(() => new Response("busy", { status: 503 }));
+  await assert.rejects(quarantine.submitToNca(id, "system:auto-report", { ...NCA, fetchImpl: down.fetchImpl }));
+  let [rec] = await quarantine.list("admin:1");
+  assert.equal(rec.nca.error.permanent, false);
+  assert.equal(quarantine.autoReportBlocker(rec), null);
+  const bad = ncaFetch(() => new Response('{"status":400,"message":"bad"}', { status: 400 }));
+  await assert.rejects(quarantine.submitToNca(id, "system:auto-report", { ...NCA, fetchImpl: bad.fetchImpl }));
+  [rec] = await quarantine.list("admin:1");
+  assert.match(quarantine.autoReportBlocker(rec), /refused/);
+});
+
+test("NCA: what is not reported automatically, and why", async () => {
+  const { quarantine } = storeAt({ t: Date.parse("2026-11-05T10:05:00Z") });
+  const csam = await quarantine.put({ detection: detection({ category: "csam", attachment_id: "9" }), content: Buffer.from("x"), subject: {} });
+  const ham = await quarantine.put({ detection: detection({ category: "harmful-abusive-material" }), content: Buffer.from("y"), subject: {} });
+  const intake = await quarantine.put({
+    detection: detection({ category: "csam" }),
+    content: null,
+    subject: { guild_id: "1" },
+    intake: { route: "email", recorded_by: "admin:1", recorded_at: "2026-11-05T10:05:00Z", auto_report: false },
+  });
+  const all = await quarantine.list("admin:1");
+  const by = (id) => all.find((r) => r.id === id);
+  assert.equal(quarantine.autoReportBlocker(by(csam), all), null);
+  assert.match(quarantine.autoReportBlocker(by(ham), all), /harmful-abusive-material/);
+  assert.match(quarantine.autoReportBlocker(by(intake), all), /by hand/);
+  assert.equal(by(intake).content.stored, false);
+  await quarantine.setAutoReport(csam, "checking with the solicitor", "admin:1");
+  const [paused] = (await quarantine.list("admin:1")).filter((r) => r.id === csam);
+  assert.match(quarantine.autoReportBlocker(paused), /paused: checking/);
+});
+
+test("NCA: the same attachment matched twice (store, then re-upload) is reported once", async () => {
+  const clock = { t: Date.parse("2026-11-05T10:05:00Z") };
+  const { quarantine } = storeAt(clock);
+  const first = await quarantine.put({ detection: detection({ category: "csam", attachment_id: "9" }), content: Buffer.from("x"), subject: {} });
+  clock.t += 60_000;
+  const second = await quarantine.put({ detection: detection({ category: "csam", attachment_id: "9", stage: "reupload" }), content: Buffer.from("x"), subject: {} });
+  const all = await quarantine.list("admin:1");
+  assert.equal(quarantine.autoReportBlocker(all.find((r) => r.id === first), all), null);
+  assert.equal(quarantine.autoReportBlocker(all.find((r) => r.id === second), all), `same file as ${first}`);
 });

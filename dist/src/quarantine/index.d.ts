@@ -1,4 +1,5 @@
 import type { Detection } from "../scan/scanner.js";
+import { type NcaConfig, type NcaResult } from "./nca.js";
 /** reg 8: content, report, basis and relevant data. */
 export declare const RETENTION_DAYS = 365;
 /** reg 8: the report reference. */
@@ -63,7 +64,49 @@ export interface QuarantineRecord {
         reported_at: string;
         recorded_by: string;
         recorded_at: string;
+        /** Set when it went through the API: the NCA's own ids. */
+        via_api?: {
+            referral_id: string;
+            report_id?: number;
+        };
     };
+    /** How it came to Quark when not from the image check. */
+    intake?: Intake;
+    /** Automatic reporting to the NCA (`autoReportBlocker`). */
+    nca?: {
+        /** Set by an admin: do not report automatically, and why. */
+        paused?: {
+            reason: string;
+            set_by: string;
+            set_at: string;
+        };
+        attempts?: number;
+        last_attempt_at?: string;
+        /** The last failure. `permanent`: the API refused the report itself. */
+        error?: {
+            message: string;
+            permanent: boolean;
+            at: string;
+        };
+        /** Another report already covers this file (same attachment). */
+        covered_by?: string;
+    };
+}
+/** Routes a report can come to Quark by, other than the image check. */
+export declare const INTAKE_ROUTES: readonly ["email", "legal_report_form", "support_server", "discord", "police", "regulator", "other_org"];
+export type IntakeRoute = (typeof INTAKE_ROUTES)[number];
+export interface Intake {
+    route: IntakeRoute;
+    /** Who reported it, as they gave it (a name, an address, "anonymous"). */
+    reporter?: string;
+    /** Their reference, e.g. a police case number. */
+    reference?: string;
+    /** One neutral sentence: what was alleged. */
+    summary?: string;
+    recorded_by: string;
+    recorded_at: string;
+    /** Report to the NCA without waiting for an admin. */
+    auto_report: boolean;
 }
 /** What is listed on the admin page: everything but the relevant data. */
 export type QuarantineSummary = Omit<QuarantineRecord, "relevant_data">;
@@ -90,18 +133,20 @@ export interface AccessEntry {
     time: string;
     /** `admin:<discord id>`, or `system:<what>` for the apps themselves. */
     actor: string;
-    action: "write" | "list" | "read" | "export_fields" | "export_content" | "record_report" | "set_priority" | "set_hold" | "add_relevant_data" | "expire" | "expire_reference";
+    action: "write" | "list" | "read" | "export_fields" | "export_content" | "record_report" | "set_priority" | "set_hold" | "add_relevant_data" | "expire" | "expire_reference" | "intake" | "submit_nca" | "submit_nca_failed" | "set_auto_report";
     id?: string;
     detail?: string;
 }
 export interface PutInput {
     detection: Detection;
-    content: Buffer;
+    /** The file; null for a report with no file Quark still holds. */
+    content: Buffer | null;
     contentType?: string;
     fileName?: string;
     subject: QuarantineSubject;
     relevantData?: unknown;
     relevantDataError?: string;
+    intake?: Intake;
 }
 /** The part of an S3 client this needs; tests pass a map. */
 export interface ObjectClient {
@@ -237,6 +282,11 @@ export declare class Quarantine {
             reported_at: string;
             recorded_by: string;
             recorded_at: string;
+            /** Set when it went through the API: the NCA's own ids. */
+            via_api?: {
+                referral_id: string;
+                report_id?: number;
+            };
         } | null;
     }>;
     /**
@@ -253,25 +303,39 @@ export declare class Quarantine {
      */
     previousReports(item: QuarantineRecord): Promise<PreviousReport[]>;
     /**
-     * The file, sealed again under a new one-off key, for handing to the NCA.
-     * The stored copy and its key never leave; the one-off key is returned once
-     * and is not kept anywhere.
+     * Stop (reason) or allow (null) automatic reporting of one item. A report
+     * an admin submits by hand is not affected.
      */
-    exportContent(id: string, actor: string): Promise<{
-        sealed: Buffer;
-        key: string;
-        sha256: string;
-        name: string;
+    setAutoReport(id: string, pausedReason: string | null, actor: string): Promise<QuarantineRecord>;
+    /**
+     * Why an item is not reported automatically, or null when it should be.
+     * `others` are the other items, to find one that already covers the same
+     * file (the same attachment matched when stored and again before re-upload).
+     */
+    autoReportBlocker(record: QuarantineSummary, others?: QuarantineSummary[]): string | null;
+    /**
+     * Report one item to the NCA through the API: the fields, a JSON document
+     * with everything else held, and the file itself, sent from here. The
+     * reference is then recorded as for any report. Throws `NcaError`; a 400
+     * is kept on the item so it is not tried again automatically.
+     */
+    submitToNca(id: string, actor: string, config: NcaConfig, app?: AppReportData): Promise<{
+        record: QuarantineRecord;
+        result: NcaResult;
     }>;
     /**
      * Record the NCA's reference for a submitted report. The item is then kept
      * at least a year from the report date, and the reference five years.
      */
-    recordReport(id: string, { reference, reportedAt, submitted, }: {
+    recordReport(id: string, { reference, reportedAt, submitted, viaApi, }: {
         reference: string;
         reportedAt: string;
         /** The report as submitted; the fields as they stand when not given. */
         submitted?: unknown;
+        viaApi?: {
+            referral_id: string;
+            report_id?: number;
+        };
     }, actor: string): Promise<QuarantineRecord>;
     /** Report references still kept, including those whose item has gone. */
     references(actor: string): Promise<QuarantineReference[]>;
@@ -420,6 +484,11 @@ export declare function reportFieldsOf(item: QuarantineRecord | QuarantineItem, 
         reported_at: string;
         recorded_by: string;
         recorded_at: string;
+        /** Set when it went through the API: the NCA's own ids. */
+        via_api?: {
+            referral_id: string;
+            report_id?: number;
+        };
     } | null;
 };
 /**
@@ -437,5 +506,4 @@ export declare function reportFieldsOf(item: QuarantineRecord | QuarantineItem, 
  * is made.
  */
 export declare function quarantineFromEnv(env?: NodeJS.ProcessEnv): Quarantine | undefined;
-/** Open a file exported by `exportContent`, given its one-off key. */
-export declare function openExport(sealed: Buffer, key: string, name: string): Buffer;
+export * from "./nca.js";
