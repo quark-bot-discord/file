@@ -385,7 +385,7 @@ export class Quarantine {
                 }
             }
             const sameUser = !!userId && keptUser === userId;
-            const sameImage = kept.pdq === item.detection.pdq;
+            const sameImage = !!kept.pdq && kept.pdq === item.detection.pdq;
             if (!sameUser && !sameImage)
                 continue;
             out.push({
@@ -745,16 +745,24 @@ export function reportFieldsOf(item, extra = {}) {
             billing: extra.billingError ? null : (billing ?? null),
         },
         "4_content": {
-            description: "Image file matched against known material by perceptual hash. Not viewed by Quark.",
+            description: item.intake
+                ? item.content.stored
+                    ? `Quark's stored copy of the reported file, kept without being viewed. Reported to Quark via ${item.intake.route}: ${item.intake.summary ?? ""}`
+                    : `Reported to Quark via ${item.intake.route}: ${item.intake.summary ?? ""}. Quark holds no copy of the file.`
+                : "Image file matched against known material by perceptual hash. Not viewed by Quark.",
             file_type: item.content.type ?? null,
             file_name: item.content.name ?? null,
             size_bytes: item.content.bytes,
             sha256: item.content.sha256,
             exif: extra.exif ?? null,
-            held: "Kept encrypted in Quark's restricted store; the file is handed over separately.",
+            held: item.content.stored
+                ? "Kept encrypted in Quark's restricted store, and sent with this report straight from it."
+                : "Not held by Quark.",
         },
         "5_how_detected": {
-            method: "PDQ perceptual hash computed by Quark and matched by Project Arachnid Shield (Canadian Centre for Child Protection). Only the hash was sent.",
+            method: item.intake
+                ? `Reported to Quark (${item.intake.route}${item.intake.reporter ? `, by ${item.intake.reporter}` : ""}${item.intake.reference ? `, their reference ${item.intake.reference}` : ""}). Not matched by Quark's image check.`
+                : "PDQ perceptual hash computed by Quark and matched by Project Arachnid Shield (Canadian Centre for Child Protection). Only the hash was sent.",
             provider: d.provider,
             classification: d.category,
             match_type: d.match_type,
@@ -769,14 +777,20 @@ export function reportFieldsOf(item, extra = {}) {
         "6_when_and_where": {
             posted_or_uploaded_at: d.time,
             detected_at: item.detected_at,
-            where: d.stage === "upload"
-                ? `Upload to the quark.bot dashboard${s.route ? ` (${s.route})` : ""}`
-                : d.stage === "store"
-                    ? "Attachment posted in a Discord server, checked when Quark stored it for its logs"
-                    : "Attachment stored by Quark, checked before Quark re-posted it in a log",
-            url: d.stage === "upload"
-                ? uploadUrl(s.route)
-                : messageUrl(guildId, channelId, s.message_id),
+            where: item.intake
+                ? guildId
+                    ? "In a Discord server that uses Quark, as reported to Quark"
+                    : "As reported to Quark"
+                : d.stage === "upload"
+                    ? `Upload to the quark.bot dashboard${s.route ? ` (${s.route})` : ""}`
+                    : d.stage === "store"
+                        ? "Attachment posted in a Discord server, checked when Quark stored it for its logs"
+                        : "Attachment stored by Quark, checked before Quark re-posted it in a log",
+            url: item.intake
+                ? messageUrl(guildId, channelId, s.message_id)
+                : d.stage === "upload"
+                    ? uploadUrl(s.route)
+                    : messageUrl(guildId, channelId, s.message_id),
             discord_server_id: guildId ?? null,
             discord_server_name: s.guild_name ?? null,
             discord_channel_id: channelId ?? null,
