@@ -133,7 +133,7 @@ export interface AccessEntry {
     time: string;
     /** `admin:<discord id>`, or `system:<what>` for the apps themselves. */
     actor: string;
-    action: "write" | "list" | "read" | "export_fields" | "export_content" | "record_report" | "set_priority" | "set_hold" | "add_relevant_data" | "expire" | "expire_reference" | "intake" | "submit_nca" | "submit_nca_failed" | "set_auto_report";
+    action: "write" | "list" | "read" | "export_fields" | "export_content" | "record_report" | "set_priority" | "set_hold" | "add_relevant_data" | "expire" | "expire_reference" | "intake" | "submit_nca" | "submit_nca_failed" | "set_auto_report" | "delete_unreported";
     id?: string;
     detail?: string;
 }
@@ -202,6 +202,16 @@ export declare class Quarantine {
      * item expires at its usual time.
      */
     setHold(id: string, reason: string | null, actor: string): Promise<QuarantineRecord>;
+    /**
+     * Delete an item that is not to be reported: the database's
+     * `harmful-abusive-material`, a recorded report found not to be CSEA, a
+     * match judged a false positive by the NCA or the police. Everything
+     * stored for it goes; the access log keeps who deleted it, when and why.
+     *
+     * Refused for an item already reported (regulation 8 keeps it a year from
+     * the report) and for one on legal hold.
+     */
+    deleteUnreported(id: string, reason: string, actor: string): Promise<void>;
     private writeRecord;
     /**
      * The fields a report needs (Schedule 1, "where available"), as one

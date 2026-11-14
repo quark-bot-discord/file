@@ -331,6 +331,30 @@ export class Quarantine {
         });
         return record;
     }
+    /**
+     * Delete an item that is not to be reported: the database's
+     * `harmful-abusive-material`, a recorded report found not to be CSEA, a
+     * match judged a false positive by the NCA or the police. Everything
+     * stored for it goes; the access log keeps who deleted it, when and why.
+     *
+     * Refused for an item already reported (regulation 8 keeps it a year from
+     * the report) and for one on legal hold.
+     */
+    async deleteUnreported(id, reason, actor) {
+        const record = await this.readRecord(id);
+        if (record.report)
+            throw new Error("Reported items are kept for one year from the report and cannot be deleted");
+        if (record.hold)
+            throw new Error("This item is on legal hold. Lift the hold first");
+        const clean = reason.trim();
+        if (!clean || clean.length > 500)
+            throw new Error("The reason must be 1 to 500 characters");
+        for (const name of await this.listNames(`items/${id}/`))
+            if (name !== `items/${id}/record`)
+                await this.remove(name);
+        await this.remove(`items/${id}/record`);
+        await this.logAccess({ actor, action: "delete_unreported", id, detail: clean });
+    }
     async writeRecord(record) {
         await this.putSealed(`items/${record.id}/record`, Buffer.from(JSON.stringify(record)));
     }

@@ -82,7 +82,6 @@ export class AttachmentStore {
   constructor(
     private client: ObjectClient,
     private bucket: string,
-    private encryptionSecret: string | undefined = process.env.FILE_ENCRYPTION_SECRET || undefined,
   ) {}
 
   get bucketName() {
@@ -128,7 +127,7 @@ export class AttachmentStore {
         let keys: { key: string; iv: string };
         try {
           keys = FileStorage.prototype.getEncryptionKeys.call(
-            { encryptionSecret: this.encryptionSecret },
+            {},
             ref.guildId,
             ref.channelId,
             ref.attachmentId,
@@ -136,7 +135,7 @@ export class AttachmentStore {
             copy.keyVersion,
           );
         } catch {
-          continue; // version 2 without the secret
+          continue; // a key version this store cannot derive
         }
         try {
           // eslint-disable-next-line no-await-in-loop
@@ -196,7 +195,6 @@ export function attachmentStoresFromEnv(
         credentials: { accessKeyId, secretAccessKey },
       }),
       `${base}${bucket}`,
-      env.FILE_ENCRYPTION_SECRET || undefined,
     ),
   }));
 }
