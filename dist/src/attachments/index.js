@@ -45,10 +45,9 @@ async function collect(stream) {
     return Buffer.concat(chunks);
 }
 export class AttachmentStore {
-    constructor(client, bucket, encryptionSecret = process.env.FILE_ENCRYPTION_SECRET || undefined) {
+    constructor(client, bucket) {
         this.client = client;
         this.bucket = bucket;
-        this.encryptionSecret = encryptionSecret;
     }
     get bucketName() {
         return this.bucket;
@@ -89,10 +88,10 @@ export class AttachmentStore {
                 tried.push(size);
                 let keys;
                 try {
-                    keys = FileStorage.prototype.getEncryptionKeys.call({ encryptionSecret: this.encryptionSecret }, ref.guildId, ref.channelId, ref.attachmentId, size, copy.keyVersion);
+                    keys = FileStorage.prototype.getEncryptionKeys.call({}, ref.guildId, ref.channelId, ref.attachmentId, size, copy.keyVersion);
                 }
                 catch {
-                    continue; // version 2 without the secret
+                    continue; // a key version this store cannot derive
                 }
                 try {
                     // eslint-disable-next-line no-await-in-loop
@@ -148,7 +147,7 @@ export function attachmentStoresFromEnv(env = process.env) {
             region: env.FILES_S3_REGION || "se-sto-1",
             bucketEndpoint: true,
             credentials: { accessKeyId, secretAccessKey },
-        }), `${base}${bucket}`, env.FILE_ENCRYPTION_SECRET || undefined),
+        }), `${base}${bucket}`),
     }));
 }
 //# sourceMappingURL=index.js.map

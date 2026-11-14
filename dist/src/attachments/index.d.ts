@@ -22,8 +22,7 @@ export declare function storedNames(ref: AttachmentRef, keys?: string[]): string
 export declare class AttachmentStore {
     private client;
     private bucket;
-    private encryptionSecret;
-    constructor(client: ObjectClient, bucket: string, encryptionSecret?: string | undefined);
+    constructor(client: ObjectClient, bucket: string);
     get bucketName(): string;
     find(ref: AttachmentRef, keys?: string[]): Promise<FoundCopy[]>;
     /**

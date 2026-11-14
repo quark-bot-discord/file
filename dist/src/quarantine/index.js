@@ -33,6 +33,8 @@
  *                         tickets for a bot match)
  *   items/<id>/submitted  sealed JSON: the report as submitted to the NCA
  *   references/<id>       sealed JSON: QuarantineReference
+ *   settings/nca-api-key  sealed JSON: NcaApiKeyRecord, the NCA API key
+ *                         entered on the admin page (it lasts six months)
  *   access/<yyyy>/<mm>/<time>-<rand>.json   plain JSON: AccessEntry
  */
 import { createCipheriv, createDecipheriv, createHash, randomBytes, } from "crypto";
@@ -63,6 +65,7 @@ export const INTAKE_ROUTES = [
     "regulator",
     "other_org",
 ];
+const NCA_KEY_OBJECT = "settings/nca-api-key";
 export class QuarantineNotFound extends Error {
 }
 /** Seal bytes under the key, bound to the object name. */
@@ -185,6 +188,53 @@ export class Quarantine {
         }
         await this.logAccess({ actor, action: "read", detail: "access log" });
         return entries;
+    }
+    /* ---------------- NCA API key ---------------- */
+    /**
+     * Store a new NCA API key, replacing the old one. Logged, without the key.
+     */
+    async setNcaApiKey(apiKey, expiresAt, actor) {
+        const key = apiKey.trim();
+        if (!key || key.length > 1000 || /\s/.test(key))
+            throw new Error("That does not look like an API key");
+        if (Number.isNaN(expiresAt.getTime()) || expiresAt <= this.now())
+            throw new Error("The expiry date must be in the future");
+        const record = {
+            api_key: key,
+            set_at: this.now().toISOString(),
+            set_by: actor,
+            expires_at: expiresAt.toISOString(),
+            reminded: [],
+        };
+        await this.logAccess({
+            actor,
+            action: "set_nca_api_key",
+            detail: `ending ${key.slice(-4)}, expires ${record.expires_at.slice(0, 10)}`,
+        });
+        await this.putSealed(NCA_KEY_OBJECT, Buffer.from(JSON.stringify(record)));
+        return statusOf(record);
+    }
+    /** The stored key, for sending reports. Null if none was entered. */
+    async ncaApiKey() {
+        const plain = await this.getSealed(NCA_KEY_OBJECT);
+        return plain ? JSON.parse(plain.toString("utf8")) : null;
+    }
+    /** When and by whom the key was set, its expiry and last four characters. */
+    async ncaApiKeyStatus() {
+        const record = await this.ncaApiKey();
+        return record ? statusOf(record) : null;
+    }
+    /**
+     * Note that the reminder for `days` before expiry was sent, so it is sent
+     * once. False if the key changed since `setAt` or it was already sent.
+     */
+    async markNcaKeyReminder(setAt, days) {
+        const record = await this.ncaApiKey();
+        if (!record || record.set_at !== setAt || record.reminded.includes(days))
+            return false;
+        record.reminded.push(days);
+        await this.putSealed(NCA_KEY_OBJECT, Buffer.from(JSON.stringify(record)));
+        return true;
     }
     /* ---------------- items ---------------- */
     /** Keep a matched file and its data. Resolves with the item's id. */
@@ -331,6 +381,30 @@ export class Quarantine {
         });
         return record;
     }
+    /**
+     * Delete an item that is not to be reported: the database's
+     * `harmful-abusive-material`, a recorded report found not to be CSEA, a
+     * match judged a false positive by the NCA or the police. Everything
+     * stored for it goes; the access log keeps who deleted it, when and why.
+     *
+     * Refused for an item already reported (regulation 8 keeps it a year from
+     * the report) and for one on legal hold.
+     */
+    async deleteUnreported(id, reason, actor) {
+        const record = await this.readRecord(id);
+        if (record.report)
+            throw new Error("Reported items are kept for one year from the report and cannot be deleted");
+        if (record.hold)
+            throw new Error("This item is on legal hold. Lift the hold first");
+        const clean = reason.trim();
+        if (!clean || clean.length > 500)
+            throw new Error("The reason must be 1 to 500 characters");
+        for (const name of await this.listNames(`items/${id}/`))
+            if (name !== `items/${id}/record`)
+                await this.remove(name);
+        await this.remove(`items/${id}/record`);
+        await this.logAccess({ actor, action: "delete_unreported", id, detail: clean });
+    }
     async writeRecord(record) {
         await this.putSealed(`items/${record.id}/record`, Buffer.from(JSON.stringify(record)));
     }
@@ -417,7 +491,9 @@ export class Quarantine {
     /**
      * Why an item is not reported automatically, or null when it should be.
      * `others` are the other items, to find one that already covers the same
-     * file (the same attachment matched when stored and again before re-upload).
+     * file: the same attachment matched when stored and again before re-upload,
+     * or copied by more than one bot (a server with both main and Pro). The
+     * earliest is reported; ties go to the lower id.
      */
     autoReportBlocker(record, others = []) {
         if (record.report)
@@ -434,7 +510,9 @@ export class Quarantine {
         if (attachment) {
             const earlier = others.find((o) => o.id !== record.id &&
                 (o.subject.attachment_id ?? o.detection.attachment_id) === attachment &&
-                (o.report || o.detected_at < record.detected_at));
+                (o.report ||
+                    o.detected_at < record.detected_at ||
+                    (o.detected_at === record.detected_at && o.id < record.id)));
             if (earlier)
                 return `same file as ${earlier.id}`;
         }
@@ -851,6 +929,14 @@ export function quarantineFromEnv(env = process.env) {
         bucket,
         key,
     });
+}
+function statusOf(record) {
+    return {
+        set_at: record.set_at,
+        set_by: record.set_by,
+        expires_at: record.expires_at,
+        last4: record.api_key.slice(-4),
+    };
 }
 export * from "./nca.js";
 //# sourceMappingURL=index.js.map

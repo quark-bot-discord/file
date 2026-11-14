@@ -823,3 +823,33 @@ test("NCA: the same attachment matched twice (store, then re-upload) is reported
   assert.equal(quarantine.autoReportBlocker(all.find((r) => r.id === first), all), null);
   assert.equal(quarantine.autoReportBlocker(all.find((r) => r.id === second), all), `same file as ${first}`);
 });
+
+test("NCA: main and Pro copying the same attachment at the same moment report it once", async () => {
+  const clock = { t: Date.parse("2026-11-05T10:05:00Z") };
+  const { quarantine } = storeAt(clock);
+  const a = await quarantine.put({ detection: detection({ category: "csam", attachment_id: "77", provider: "main" }), content: Buffer.from("x"), subject: {} });
+  const b = await quarantine.put({ detection: detection({ category: "csam", attachment_id: "77", provider: "pro" }), content: Buffer.from("x"), subject: {} });
+  const all = await quarantine.list("admin:1");
+  const blockers = [a, b].map((id) => quarantine.autoReportBlocker(all.find((r) => r.id === id), all));
+  assert.equal(blockers.filter((x) => x === null).length, 1);
+  const kept = [a, b].sort()[0];
+  assert.equal(blockers[[a, b].indexOf(kept)], null);
+});
+
+test("NCA API key: stored sealed, shown only by its last four, reminders sent once", async () => {
+  const clock = { t: Date.parse("2026-11-14T10:00:00Z") };
+  const { client, quarantine } = storeAt(clock);
+  assert.equal(await quarantine.ncaApiKeyStatus(), null);
+  await assert.rejects(quarantine.setNcaApiKey("abc def", new Date("2027-05-14"), "admin:1"));
+  await assert.rejects(quarantine.setNcaApiKey("key-1234", new Date("2026-11-01"), "admin:1"));
+  const status = await quarantine.setNcaApiKey(" secret-key-9876 ", new Date("2027-05-14T00:00:00Z"), "admin:1");
+  assert.deepEqual(status, { set_at: "2026-11-14T10:00:00.000Z", set_by: "admin:1", expires_at: "2027-05-14T00:00:00.000Z", last4: "9876" });
+  assert.equal((await quarantine.ncaApiKey()).api_key, "secret-key-9876");
+  const raw = [...client.objects.entries()].filter(([name]) => !name.startsWith("access/")).map(([, body]) => Buffer.from(body).toString("latin1")).join();
+  assert.ok(!raw.includes("secret-key"), "the key is never stored in the clear");
+  const log = await quarantine.accessLog("admin:1");
+  assert.ok(log.some((e) => e.action === "set_nca_api_key" && !JSON.stringify(e).includes("secret-key")));
+  assert.equal(await quarantine.markNcaKeyReminder(status.set_at, 30), true);
+  assert.equal(await quarantine.markNcaKeyReminder(status.set_at, 30), false);
+  assert.equal(await quarantine.markNcaKeyReminder("2026-01-01T00:00:00.000Z", 14), false);
+});

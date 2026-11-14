@@ -133,9 +133,26 @@ export interface AccessEntry {
     time: string;
     /** `admin:<discord id>`, or `system:<what>` for the apps themselves. */
     actor: string;
-    action: "write" | "list" | "read" | "export_fields" | "export_content" | "record_report" | "set_priority" | "set_hold" | "add_relevant_data" | "expire" | "expire_reference" | "intake" | "submit_nca" | "submit_nca_failed" | "set_auto_report";
+    action: "write" | "list" | "read" | "export_fields" | "export_content" | "record_report" | "set_priority" | "set_hold" | "add_relevant_data" | "expire" | "expire_reference" | "intake" | "submit_nca" | "submit_nca_failed" | "set_auto_report" | "delete_unreported" | "set_nca_api_key";
     id?: string;
     detail?: string;
+}
+/** The NCA API key as entered on the admin page. Never sent back to a page. */
+export interface NcaApiKeyRecord {
+    api_key: string;
+    set_at: string;
+    set_by: string;
+    /** When the NCA says the key stops working (they last six months). */
+    expires_at: string;
+    /** Reminders already sent, in days before expiry (0 = expired). */
+    reminded: number[];
+}
+/** What a page may see of the stored key. */
+export interface NcaApiKeyStatus {
+    set_at: string;
+    set_by: string;
+    expires_at: string;
+    last4: string;
 }
 export interface PutInput {
     detection: Detection;
@@ -180,6 +197,19 @@ export declare class Quarantine {
     logAccess(entry: Omit<AccessEntry, "time">): Promise<void>;
     /** The access log, newest first, up to `limit` entries. */
     accessLog(actor: string, limit?: number): Promise<AccessEntry[]>;
+    /**
+     * Store a new NCA API key, replacing the old one. Logged, without the key.
+     */
+    setNcaApiKey(apiKey: string, expiresAt: Date, actor: string): Promise<NcaApiKeyStatus>;
+    /** The stored key, for sending reports. Null if none was entered. */
+    ncaApiKey(): Promise<NcaApiKeyRecord | null>;
+    /** When and by whom the key was set, its expiry and last four characters. */
+    ncaApiKeyStatus(): Promise<NcaApiKeyStatus | null>;
+    /**
+     * Note that the reminder for `days` before expiry was sent, so it is sent
+     * once. False if the key changed since `setAt` or it was already sent.
+     */
+    markNcaKeyReminder(setAt: string, days: number): Promise<boolean>;
     /** Keep a matched file and its data. Resolves with the item's id. */
     put(input: PutInput): Promise<string>;
     private readRecord;
@@ -202,6 +232,16 @@ export declare class Quarantine {
      * item expires at its usual time.
      */
     setHold(id: string, reason: string | null, actor: string): Promise<QuarantineRecord>;
+    /**
+     * Delete an item that is not to be reported: the database's
+     * `harmful-abusive-material`, a recorded report found not to be CSEA, a
+     * match judged a false positive by the NCA or the police. Everything
+     * stored for it goes; the access log keeps who deleted it, when and why.
+     *
+     * Refused for an item already reported (regulation 8 keeps it a year from
+     * the report) and for one on legal hold.
+     */
+    deleteUnreported(id: string, reason: string, actor: string): Promise<void>;
     private writeRecord;
     /**
      * The fields a report needs (Schedule 1, "where available"), as one
@@ -310,7 +350,9 @@ export declare class Quarantine {
     /**
      * Why an item is not reported automatically, or null when it should be.
      * `others` are the other items, to find one that already covers the same
-     * file (the same attachment matched when stored and again before re-upload).
+     * file: the same attachment matched when stored and again before re-upload,
+     * or copied by more than one bot (a server with both main and Pro). The
+     * earliest is reported; ties go to the lower id.
      */
     autoReportBlocker(record: QuarantineSummary, others?: QuarantineSummary[]): string | null;
     /**

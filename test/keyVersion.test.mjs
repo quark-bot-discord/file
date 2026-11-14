@@ -176,7 +176,7 @@ test("keyed objects (assets) stay on version 1 even with a secret", async () => 
 test("file/attachments: finds, reads back (with and without the recorded size) and deletes a stored copy", async () => {
   const { AttachmentStore, storedNames, attachmentFromUrl } = await import("../dist/src/attachments/index.js");
   const store = new Map();
-  await save(storage(store, "secret-b"));
+  await save(storage(store, undefined));
   const client = {
     async send(command) {
       const { Key } = command.input;
@@ -193,19 +193,17 @@ test("file/attachments: finds, reads back (with and without the recorded size) a
   assert.deepEqual(attachmentFromUrl("https://cdn.discordapp.com/attachments/123456789012345678/223456789012345678/a.png?x=1"), {
     channelId: "123456789012345678", attachmentId: "223456789012345678",
   });
-  const files = new AttachmentStore(client, "b", "secret-b");
+  const files = new AttachmentStore(client, "b");
   const [found] = await files.find(ref);
   assert.equal(found.size, original.length);
-  assert.equal(found.keyVersion, 2);
+  assert.equal(found.keyVersion, 1);
   const read1 = await files.read(ref);
   assert.deepEqual(read1.bytes, original);
   // An older copy, without the size: the wrong one is tried first, then the right one.
   const name = [...store.keys()][0];
-  store.get(name).Metadata = { kv: "2" };
+  store.get(name).Metadata = {};
   assert.equal((await files.read(ref)).bytes, null);
   assert.deepEqual((await files.read(ref, [12345, original.length])).bytes, original);
-  // Without the secret a version 2 copy cannot be opened.
-  assert.equal((await new AttachmentStore(client, "b", undefined).read(ref, [original.length])).bytes, null);
   assert.deepEqual(await files.delete(ref), [name]);
   assert.deepEqual(await files.find(ref), []);
 });
