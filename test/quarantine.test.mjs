@@ -823,3 +823,15 @@ test("NCA: the same attachment matched twice (store, then re-upload) is reported
   assert.equal(quarantine.autoReportBlocker(all.find((r) => r.id === first), all), null);
   assert.equal(quarantine.autoReportBlocker(all.find((r) => r.id === second), all), `same file as ${first}`);
 });
+
+test("NCA: main and Pro copying the same attachment at the same moment report it once", async () => {
+  const clock = { t: Date.parse("2026-11-05T10:05:00Z") };
+  const { quarantine } = storeAt(clock);
+  const a = await quarantine.put({ detection: detection({ category: "csam", attachment_id: "77", provider: "main" }), content: Buffer.from("x"), subject: {} });
+  const b = await quarantine.put({ detection: detection({ category: "csam", attachment_id: "77", provider: "pro" }), content: Buffer.from("x"), subject: {} });
+  const all = await quarantine.list("admin:1");
+  const blockers = [a, b].map((id) => quarantine.autoReportBlocker(all.find((r) => r.id === id), all));
+  assert.equal(blockers.filter((x) => x === null).length, 1);
+  const kept = [a, b].sort()[0];
+  assert.equal(blockers[[a, b].indexOf(kept)], null);
+});

@@ -675,7 +675,9 @@ export class Quarantine {
   /**
    * Why an item is not reported automatically, or null when it should be.
    * `others` are the other items, to find one that already covers the same
-   * file (the same attachment matched when stored and again before re-upload).
+   * file: the same attachment matched when stored and again before re-upload,
+   * or copied by more than one bot (a server with both main and Pro). The
+   * earliest is reported; ties go to the lower id.
    */
   autoReportBlocker(record: QuarantineSummary, others: QuarantineSummary[] = []): string | null {
     if (record.report) return "already reported";
@@ -690,7 +692,9 @@ export class Quarantine {
         (o) =>
           o.id !== record.id &&
           (o.subject.attachment_id ?? o.detection.attachment_id) === attachment &&
-          (o.report || o.detected_at < record.detected_at),
+          (o.report ||
+            o.detected_at < record.detected_at ||
+            (o.detected_at === record.detected_at && o.id < record.id)),
       );
       if (earlier) return `same file as ${earlier.id}`;
     }
