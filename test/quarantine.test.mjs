@@ -228,6 +228,24 @@ test("an unreported item is deleted after a year, and not before", async () => {
   assert.ok(accessActions(client).includes("expire"));
 });
 
+test("an item not to be reported can be deleted, with a reason, unless reported or on hold", async () => {
+  const clock = { t: Date.parse("2026-11-05T10:00:00Z") };
+  const { client, quarantine } = storeAt(clock);
+  const id = await quarantine.put({ detection: detection(), content: Buffer.from("x"), subject: {} });
+  await assert.rejects(quarantine.deleteUnreported(id, "  ", "admin:1"));
+  await quarantine.setHold(id, "Police request", "admin:1");
+  await assert.rejects(quarantine.deleteUnreported(id, "not CSEA", "admin:1"), /legal hold/);
+  await quarantine.setHold(id, null, "admin:1");
+  await quarantine.deleteUnreported(id, "harmful-abusive-material: not reportable", "admin:1");
+  assert.ok(![...client.objects.keys()].some((n) => n.startsWith(`items/${id}/`)));
+  await assert.rejects(quarantine.get(id, "admin:1"), QuarantineNotFound);
+  assert.ok(accessActions(client).includes("delete_unreported"));
+
+  const reported = await quarantine.put({ detection: detection(), content: Buffer.from("y"), subject: {} });
+  await quarantine.recordReport(reported, { reference: "NCA-REF-1", reportedAt: new Date(clock.t - 1000).toISOString() }, "admin:1");
+  await assert.rejects(quarantine.deleteUnreported(reported, "mistake", "admin:1"), /one year/);
+});
+
 test("a reported item is kept a year from the report, its reference five years", async () => {
   const clock = { t: Date.parse("2026-11-05T10:00:00Z") };
   const { client, quarantine } = storeAt(clock);
