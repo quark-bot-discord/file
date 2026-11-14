@@ -39,6 +39,8 @@ export interface NcaConfig {
     phoneCountryCode: string;
   };
   fetchImpl?: typeof fetch;
+  /** Tests only: the roots trusted when the server's chain has to be completed. */
+  rootCertificates?: readonly string[];
 }
 
 /** The API's settings, or undefined while any is missing. */
@@ -294,23 +296,135 @@ export class NcaError extends Error {
   }
 }
 
+/**
+ * The NCA's server sends its certificate without the intermediate that links
+ * it to a trusted root (seen November 2026: issued by Amazon RSA 2048 M04).
+ * Browsers fetch the missing intermediate themselves; Node does not, and
+ * fails with UNABLE_TO_VERIFY_LEAF_SIGNATURE. So, on that error only, do what
+ * a browser does: read the certificate's "CA Issuers" address, fetch the
+ * intermediate from there, and send again with it added. Verification is
+ * unchanged: the chain must still end at one of Node's trusted roots, and
+ * an intermediate is only accepted if it issued that certificate.
+ */
+const intermediates = new Map<string, string>();
+
+const isIncompleteChain = (error: unknown) => {
+  const code = (error as { cause?: { code?: string }; code?: string })?.cause?.code ?? (error as { code?: string })?.code;
+  return code === "UNABLE_TO_VERIFY_LEAF_SIGNATURE";
+};
+
+/** The server's own certificate, read only to find where its issuer is published. */
+async function leafOf(host: string, port: number): Promise<import("crypto").X509Certificate> {
+  const tls = await import("tls");
+  const { X509Certificate } = await import("crypto");
+  const raw = await new Promise<Buffer>((resolve, reject) => {
+    const socket = tls.connect({ host, port, servername: host, rejectUnauthorized: false }, () => {
+      const cert = socket.getPeerCertificate();
+      socket.end();
+      if (cert?.raw) resolve(cert.raw);
+      else reject(new Error(`${host} sent no certificate`));
+    });
+    socket.setTimeout(15_000, () => socket.destroy(new Error(`${host}: timed out reading its certificate`)));
+    socket.on("error", reject);
+  });
+  return new X509Certificate(raw);
+}
+
+/** The intermediate that issued `host`'s certificate, as PEM, from its CA Issuers address. */
+export async function intermediateFor(host: string, port = 443, fetchImpl: typeof fetch = fetch): Promise<string> {
+  const cached = intermediates.get(`${host}:${port}`);
+  if (cached) return cached;
+  const { X509Certificate } = await import("crypto");
+  const leaf = await leafOf(host, port);
+  const url = /CA Issuers - URI:(\S+)/.exec(leaf.infoAccess ?? "")?.[1];
+  if (!url) throw new Error(`${host}'s certificate does not say where its issuer is published`);
+  const response = await fetchImpl(url, { signal: AbortSignal.timeout(20_000) });
+  if (!response.ok) throw new Error(`Fetching ${url}: ${response.status}`);
+  const bytes = Buffer.from(await response.arrayBuffer());
+  const issuer = new X509Certificate(bytes.toString("latin1").includes("-----BEGIN") ? bytes.toString("latin1") : bytes);
+  if (!issuer.ca || !leaf.checkIssued(issuer) || !leaf.verify(issuer.publicKey))
+    throw new Error(`${url} is not the certificate that issued ${host}'s`);
+  intermediates.set(`${host}:${port}`, issuer.toString());
+  return issuer.toString();
+}
+
+/** POST with Node's https, trusting its usual roots plus `extraCa` as an intermediate. */
+async function postWithCa(
+  url: string,
+  headers: Record<string, string>,
+  form: FormData,
+  extraCa: string,
+  roots: readonly string[],
+): Promise<{ status: number; ok: boolean; body: string }> {
+  const https = await import("https");
+  const encoded = new Request(url, { method: "POST", body: form });
+  const body = Buffer.from(await encoded.arrayBuffer());
+  const type = encoded.headers.get("content-type") ?? "multipart/form-data";
+  return new Promise((resolve, reject) => {
+    const request = https.request(
+      url,
+      {
+        method: "POST",
+        headers: { ...headers, "Content-Type": type, "Content-Length": String(body.length) },
+        ca: [...roots, extraCa],
+        timeout: 120_000,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("end", () => {
+          const status = res.statusCode ?? 0;
+          resolve({ status, ok: status >= 200 && status < 300, body: Buffer.concat(chunks).toString("utf8") });
+        });
+        res.on("error", reject);
+      },
+    );
+    request.on("timeout", () => request.destroy(new Error("NCA API: timed out")));
+    request.on("error", reject);
+    request.end(body);
+  });
+}
+
 /** POSTs one referral. The file and the JSON document go as `uploadedFiles`. */
 export async function submitReferral(
   config: NcaConfig,
   payload: unknown,
   files: { name: string; type: string; bytes: Buffer }[],
 ): Promise<NcaResult> {
-  const form = new FormData();
-  form.append("submission", new Blob([JSON.stringify(payload)], { type: "application/json" }));
-  for (const f of files) form.append("uploadedFiles", new Blob([new Uint8Array(f.bytes)], { type: f.type }), f.name);
-  const response = await (config.fetchImpl ?? fetch)(`${config.baseUrl}/api/referral/`, {
-    method: "POST",
-    headers: { "X-API-KEY": config.apiKey, orgId: config.orgId },
-    body: form,
-    signal: AbortSignal.timeout(120_000),
-  });
-  const body = await response.text().catch(() => "");
-  if (!response.ok) throw new NcaError(response.status, body, response.status === 400);
+  const form = () => {
+    const f = new FormData();
+    f.append("submission", new Blob([JSON.stringify(payload)], { type: "application/json" }));
+    for (const file of files) f.append("uploadedFiles", new Blob([new Uint8Array(file.bytes)], { type: file.type }), file.name);
+    return f;
+  };
+  const url = `${config.baseUrl}/api/referral/`;
+  const headers = { "X-API-KEY": config.apiKey, orgId: config.orgId };
+  let status: number;
+  let ok: boolean;
+  let body: string;
+  try {
+    const response = await (config.fetchImpl ?? fetch)(url, {
+      method: "POST",
+      headers,
+      body: form(),
+      signal: AbortSignal.timeout(120_000),
+    });
+    ({ status, ok } = response);
+    body = await response.text().catch(() => "");
+  } catch (error) {
+    if (!isIncompleteChain(error)) throw error;
+    const target = new URL(url);
+    const intermediate = await intermediateFor(target.hostname, Number(target.port) || 443);
+    const roots = config.rootCertificates ?? (await import("tls")).rootCertificates;
+    try {
+      ({ status, ok, body } = await postWithCa(url, headers, form(), intermediate, roots));
+    } catch (retryError) {
+      // The NCA may have moved to another intermediate: fetch it afresh next time.
+      intermediates.delete(`${target.hostname}:${Number(target.port) || 443}`);
+      throw retryError;
+    }
+  }
+  if (!ok) throw new NcaError(status, body, status === 400);
   let parsed: Partial<NcaResult> & { success?: boolean } = {};
   try {
     parsed = JSON.parse(body);
@@ -318,7 +432,7 @@ export async function submitReferral(
     // Handled below.
   }
   if (!parsed.referralFriendlyID || parsed.success === false)
-    throw new NcaError(response.status, body || "no referral id in the answer", false);
+    throw new NcaError(status, body || "no referral id in the answer", false);
   return {
     referralID: String(parsed.referralID ?? ""),
     referralFriendlyID: parsed.referralFriendlyID,

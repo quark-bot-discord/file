@@ -31,6 +31,8 @@ export interface NcaConfig {
         phoneCountryCode: string;
     };
     fetchImpl?: typeof fetch;
+    /** Tests only: the roots trusted when the server's chain has to be completed. */
+    rootCertificates?: readonly string[];
 }
 /** The API's settings, or undefined while any is missing. */
 export declare function ncaConfigFromEnv(env?: NodeJS.ProcessEnv): NcaConfig | undefined;
@@ -204,6 +206,8 @@ export declare class NcaError extends Error {
     /** 400: the report itself is wrong; trying again will not help. */
     permanent: boolean);
 }
+/** The intermediate that issued `host`'s certificate, as PEM, from its CA Issuers address. */
+export declare function intermediateFor(host: string, port?: number, fetchImpl?: typeof fetch): Promise<string>;
 /** POSTs one referral. The file and the JSON document go as `uploadedFiles`. */
 export declare function submitReferral(config: NcaConfig, payload: unknown, files: {
     name: string;
