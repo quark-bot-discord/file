@@ -66,6 +66,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 export const RETENTION_DAYS = 365;
 /** reg 8: the report reference. */
 export const REFERENCE_RETENTION_DAYS = 5 * 365;
+/** The report register: six years from a case's last change. */
+export const REGISTER_RETENTION_DAYS = 6 * 365;
 
 const MAGIC = Buffer.from("QZ1");
 
@@ -215,9 +217,54 @@ export interface AccessEntry {
     | "submit_nca_failed"
     | "set_auto_report"
     | "delete_unreported"
-    | "set_nca_api_key";
+    | "set_nca_api_key"
+    | "write_register"
+    | "expire_register";
   id?: string;
   detail?: string;
+}
+
+/**
+ * One item in a register case: identifiers and what happened to it. Never
+ * content: no file, no relevant data.
+ */
+export interface RegisterItem {
+  quarantine_id: string;
+  detected_at: string;
+  category: string;
+  stage?: string;
+  pdq?: string;
+  guild_id?: string;
+  channel_id?: string;
+  message_id?: string;
+  attachment_id?: string;
+  user_id?: string;
+  outcome: "pending" | "reported" | "cleared";
+  /** The NCA reference, for a reported item. */
+  reference?: string;
+  /** When it was reported or cleared. */
+  at?: string;
+  /** Why it was cleared without a report. */
+  reason?: string;
+}
+
+/**
+ * One line of the report register (procedure section 7): a case of one or
+ * more quarantined items that belong together, written by the app and kept
+ * after the items themselves are deleted. Identifiers only.
+ */
+export interface RegisterEntry {
+  id: string;
+  opened_at: string;
+  updated_at: string;
+  /** "image check", or the intake route. */
+  route: string;
+  reporter: string;
+  type: "A";
+  /** One neutral sentence. */
+  allegation: string;
+  items: RegisterItem[];
+  notes?: string;
 }
 
 /** The NCA API key as entered on the admin page. Never sent back to a page. */
@@ -928,6 +975,24 @@ export class Quarantine {
     return out;
   }
 
+  /** Write (or replace) one case in the report register. */
+  async putRegister(entry: RegisterEntry, actor: string) {
+    if (!/^[\w-]{1,100}$/.test(entry.id)) throw new Error("Bad register id");
+    await this.putSealed(`register/${entry.id}`, Buffer.from(JSON.stringify(entry)));
+    await this.logAccess({ actor, action: "write_register", id: entry.id });
+  }
+
+  /** Every case in the report register, oldest first. */
+  async register(actor: string): Promise<RegisterEntry[]> {
+    const out: RegisterEntry[] = [];
+    for (const name of await this.listNames("register/")) {
+      const plain = await this.getSealed(name);
+      if (plain) out.push(JSON.parse(plain.toString("utf8")));
+    }
+    await this.logAccess({ actor, action: "read", detail: "register" });
+    return out.sort((a, b) => a.opened_at.localeCompare(b.opened_at));
+  }
+
   /**
    * Delete what has passed its time: items a year after detection (or after
    * the report, if later), references five years after the report, and access
@@ -965,6 +1030,14 @@ export class Quarantine {
       await this.remove(name);
       await this.logAccess({ actor, action: "expire_reference", id: kept.id });
       references++;
+    }
+    for (const name of await this.listNames("register/")) {
+      const plain = await this.getSealed(name);
+      if (!plain) continue;
+      const entry = JSON.parse(plain.toString("utf8")) as RegisterEntry;
+      if (Date.parse(addDays(entry.updated_at, REGISTER_RETENTION_DAYS)) > now.getTime()) continue;
+      await this.remove(name);
+      await this.logAccess({ actor, action: "expire_register", id: entry.id });
     }
     const cutoff = new Date(now.getTime() - REFERENCE_RETENTION_DAYS * DAY_MS)
       .toISOString()

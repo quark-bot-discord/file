@@ -4,6 +4,8 @@ import { type NcaConfig, type NcaResult } from "./nca.js";
 export declare const RETENTION_DAYS = 365;
 /** reg 8: the report reference. */
 export declare const REFERENCE_RETENTION_DAYS: number;
+/** The report register: six years from a case's last change. */
+export declare const REGISTER_RETENTION_DAYS: number;
 /** Who sent it and from where, as far as the app that found it knows. */
 export interface QuarantineSubject {
     /** Discord user id. */
@@ -137,9 +139,50 @@ export interface AccessEntry {
     time: string;
     /** `admin:<discord id>`, or `system:<what>` for the apps themselves. */
     actor: string;
-    action: "write" | "list" | "read" | "export_fields" | "export_content" | "record_report" | "set_priority" | "set_hold" | "add_relevant_data" | "expire" | "expire_reference" | "intake" | "submit_nca" | "submit_nca_failed" | "set_auto_report" | "delete_unreported" | "set_nca_api_key";
+    action: "write" | "list" | "read" | "export_fields" | "export_content" | "record_report" | "set_priority" | "set_hold" | "add_relevant_data" | "expire" | "expire_reference" | "intake" | "submit_nca" | "submit_nca_failed" | "set_auto_report" | "delete_unreported" | "set_nca_api_key" | "write_register" | "expire_register";
     id?: string;
     detail?: string;
+}
+/**
+ * One item in a register case: identifiers and what happened to it. Never
+ * content: no file, no relevant data.
+ */
+export interface RegisterItem {
+    quarantine_id: string;
+    detected_at: string;
+    category: string;
+    stage?: string;
+    pdq?: string;
+    guild_id?: string;
+    channel_id?: string;
+    message_id?: string;
+    attachment_id?: string;
+    user_id?: string;
+    outcome: "pending" | "reported" | "cleared";
+    /** The NCA reference, for a reported item. */
+    reference?: string;
+    /** When it was reported or cleared. */
+    at?: string;
+    /** Why it was cleared without a report. */
+    reason?: string;
+}
+/**
+ * One line of the report register (procedure section 7): a case of one or
+ * more quarantined items that belong together, written by the app and kept
+ * after the items themselves are deleted. Identifiers only.
+ */
+export interface RegisterEntry {
+    id: string;
+    opened_at: string;
+    updated_at: string;
+    /** "image check", or the intake route. */
+    route: string;
+    reporter: string;
+    type: "A";
+    /** One neutral sentence. */
+    allegation: string;
+    items: RegisterItem[];
+    notes?: string;
 }
 /** The NCA API key as entered on the admin page. Never sent back to a page. */
 export interface NcaApiKeyRecord {
@@ -386,6 +429,10 @@ export declare class Quarantine {
     }, actor: string): Promise<QuarantineRecord>;
     /** Report references still kept, including those whose item has gone. */
     references(actor: string): Promise<QuarantineReference[]>;
+    /** Write (or replace) one case in the report register. */
+    putRegister(entry: RegisterEntry, actor: string): Promise<void>;
+    /** Every case in the report register, oldest first. */
+    register(actor: string): Promise<RegisterEntry[]>;
     /**
      * Delete what has passed its time: items a year after detection (or after
      * the report, if later), references five years after the report, and access

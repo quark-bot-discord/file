@@ -893,3 +893,34 @@ test("NCA API key: stored sealed, shown only by its last four, reminders sent on
   assert.equal(await quarantine.markNcaKeyReminder(status.set_at, 30), false);
   assert.equal(await quarantine.markNcaKeyReminder("2026-01-01T00:00:00.000Z", 14), false);
 });
+
+test("the register keeps a case sealed, survives its items, and expires after six years", async () => {
+  const clock = { t: Date.parse("2026-11-15T10:00:00Z") };
+  const { client, quarantine } = storeAt(clock);
+  const entry = {
+    id: "case-abc",
+    opened_at: "2026-11-15T09:00:00.000Z",
+    updated_at: "2026-11-15T09:30:00.000Z",
+    route: "image check",
+    reporter: "image check",
+    type: "A",
+    allegation: "Two hash matches in one server.",
+    items: [
+      { quarantine_id: "q1", detected_at: "2026-11-15T09:00:00.000Z", category: "harmful-abusive-material", outcome: "cleared", reason: "below threshold" },
+    ],
+  };
+  await quarantine.putRegister(entry, "admin:1");
+  const sealed = client.objects.get("register/case-abc");
+  assert.ok(sealed && !sealed.toString("utf8").includes("server"), "sealed");
+  assert.deepEqual(await quarantine.register("admin:1"), [entry]);
+  await assert.rejects(() => quarantine.putRegister({ ...entry, id: "../x" }, "admin:1"), /Bad register id/);
+  assert.ok((await quarantine.accessLog("admin:1")).some((e) => e.action === "write_register"));
+
+  clock.t = Date.parse("2032-11-10T00:00:00Z");
+  await quarantine.sweep();
+  assert.equal((await quarantine.register("admin:1")).length, 1, "kept inside six years");
+  clock.t = Date.parse("2032-11-20T00:00:00Z");
+  await quarantine.sweep();
+  assert.equal((await quarantine.register("admin:1")).length, 0, "gone after six years");
+  assert.ok((await quarantine.accessLog("admin:1")).some((e) => e.action === "expire_register"));
+});
