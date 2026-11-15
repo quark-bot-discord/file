@@ -792,6 +792,46 @@ test("NCA: a 400 is kept on the item and stops automatic reporting; a 5xx does n
   assert.match(quarantine.autoReportBlocker(rec), /refused/);
 });
 
+test("NCA: only failures the NCA certainly did not process are retried", async () => {
+  const cases = [
+    [408, "retry"], [429, "retry"], [503, "retry"],
+    [401, "uncertain"], [403, "uncertain"], [500, "uncertain"], [502, "uncertain"], [504, "uncertain"],
+    [400, "refused"], [404, "refused"], [413, "refused"], [415, "refused"], [422, "refused"],
+  ];
+  for (const [status, kind] of cases) {
+    const { quarantine } = storeAt({ t: Date.parse("2026-11-05T10:05:00Z") });
+    const id = await quarantine.put({ detection: detection({ category: "csam" }), content: Buffer.from("x"), subject: {} });
+    const { fetchImpl } = ncaFetch(() => new Response("{}", { status }));
+    await assert.rejects(quarantine.submitToNca(id, "system:auto-report", { ...NCA, fetchImpl }));
+    const [rec] = await quarantine.list("admin:1");
+    assert.equal(rec.nca.error.permanent, kind !== "retry", `${status}`);
+    assert.equal(!!rec.nca.error.uncertain, kind === "uncertain", `${status}`);
+    const blocker = quarantine.autoReportBlocker(rec);
+    if (kind === "retry") assert.equal(blocker, null, `${status}`);
+    else if (kind === "uncertain") assert.match(blocker, /may have reached the NCA.*Previously submitted reports/, `${status}`);
+    else assert.match(blocker, /refused/, `${status}`);
+  }
+});
+
+test("NCA: network failures are retried only if nothing can have been sent", async () => {
+  const fail = (code) => async () => {
+    throw Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error(code), { code }) });
+  };
+  for (const [code, uncertain] of [["ENOTFOUND", false], ["ECONNREFUSED", false], ["ECONNRESET", true], ["UND_ERR_SOCKET", true]]) {
+    const { quarantine } = storeAt({ t: Date.parse("2026-11-05T10:05:00Z") });
+    const id = await quarantine.put({ detection: detection({ category: "csam" }), content: Buffer.from("x"), subject: {} });
+    await assert.rejects(quarantine.submitToNca(id, "system:auto-report", { ...NCA, fetchImpl: fail(code) }));
+    const [rec] = await quarantine.list("admin:1");
+    assert.equal(rec.nca.error.permanent, uncertain, code);
+  }
+  const { quarantine } = storeAt({ t: Date.parse("2026-11-05T10:05:00Z") });
+  const id = await quarantine.put({ detection: detection({ category: "csam" }), content: Buffer.from("x"), subject: {} });
+  const { fetchImpl } = ncaFetch(() => new Response('{"success":true}', { status: 200 }));
+  await assert.rejects(quarantine.submitToNca(id, "system:auto-report", { ...NCA, fetchImpl }));
+  const [rec] = await quarantine.list("admin:1");
+  assert.equal(rec.nca.error.uncertain, true, "a 200 with no referral number may still have been received");
+});
+
 test("NCA: what is not reported automatically, and why", async () => {
   const { quarantine } = storeAt({ t: Date.parse("2026-11-05T10:05:00Z") });
   const csam = await quarantine.put({ detection: detection({ category: "csam", attachment_id: "9" }), content: Buffer.from("x"), subject: {} });

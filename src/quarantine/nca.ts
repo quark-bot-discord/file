@@ -284,16 +284,63 @@ export interface NcaResult {
   reportID?: number;
 }
 
+/**
+ * What a failed attempt means for trying again:
+ * - `retry`: the NCA certainly did not process it (no connection was made,
+ *   or it answered 408, 429 or 503). Tried again automatically.
+ * - `refused`: the NCA rejected the report (400, 404, 413, 415, 422 and other
+ *   client errors). Trying again unchanged will not help.
+ * - `uncertain`: it may have been received. The NCA's API is known to answer
+ *   401 to a report it processed; a 5xx, a dropped connection, a timeout or a
+ *   2xx without a referral number are the same. Not tried again, so it is not
+ *   reported twice: check the portal first.
+ */
+export type NcaFailureKind = "retry" | "refused" | "uncertain";
+
+const RETRY_STATUSES = new Set([408, 429, 503]);
+const UNCERTAIN_STATUSES = new Set([401, 403]);
+
+export function kindOfStatus(status: number): NcaFailureKind {
+  if (RETRY_STATUSES.has(status)) return "retry";
+  if (UNCERTAIN_STATUSES.has(status) || status >= 500 || (status >= 200 && status < 300)) return "uncertain";
+  return "refused";
+}
+
 export class NcaError extends Error {
+  public readonly kind: NcaFailureKind;
   constructor(
     public readonly status: number,
     public readonly body: string,
-    /** 400: the report itself is wrong; trying again will not help. */
-    public readonly permanent: boolean,
+    kind: NcaFailureKind = kindOfStatus(status),
   ) {
     super(`NCA API ${status}: ${body.slice(0, 500)}`);
     this.name = "NcaError";
+    this.kind = kind;
   }
+  /** Not tried again automatically. */
+  get permanent() {
+    return this.kind !== "retry";
+  }
+}
+
+/** A failure before anything was sent (e.g. completing the certificate chain). */
+export class NcaNotSentError extends Error {
+  constructor(message: string, public readonly cause?: unknown) {
+    super(message);
+    this.name = "NcaNotSentError";
+  }
+}
+
+/** Network errors that mean the request never reached the NCA. */
+const NOT_SENT_CODES = new Set(["ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH", "UND_ERR_CONNECT_TIMEOUT"]);
+
+/** How to treat any error from `submitReferral`. */
+export function ncaFailureKind(error: unknown): NcaFailureKind {
+  if ((error as Error)?.name === "NcaError") return (error as NcaError).kind;
+  if ((error as Error)?.name === "NcaNotSentError") return "retry";
+  const code = (error as { cause?: { code?: string }; code?: string })?.cause?.code ?? (error as { code?: string })?.code ?? "";
+  if (NOT_SENT_CODES.has(code) || /^(CERT_|UNABLE_TO_|ERR_TLS_|DEPTH_ZERO|SELF_SIGNED)/.test(code)) return "retry";
+  return "uncertain";
 }
 
 /**
@@ -414,7 +461,12 @@ export async function submitReferral(
   } catch (error) {
     if (!isIncompleteChain(error)) throw error;
     const target = new URL(url);
-    const intermediate = await intermediateFor(target.hostname, Number(target.port) || 443);
+    let intermediate: string;
+    try {
+      intermediate = await intermediateFor(target.hostname, Number(target.port) || 443);
+    } catch (chainError) {
+      throw new NcaNotSentError(`Completing the NCA's certificate chain: ${(chainError as Error)?.message}`, chainError);
+    }
     const roots = config.rootCertificates ?? (await import("tls")).rootCertificates;
     try {
       ({ status, ok, body } = await postWithCa(url, headers, form(), intermediate, roots));
@@ -424,7 +476,7 @@ export async function submitReferral(
       throw retryError;
     }
   }
-  if (!ok) throw new NcaError(status, body, status === 400);
+  if (!ok) throw new NcaError(status, body);
   let parsed: Partial<NcaResult> & { success?: boolean } = {};
   try {
     parsed = JSON.parse(body);
@@ -432,7 +484,7 @@ export async function submitReferral(
     // Handled below.
   }
   if (!parsed.referralFriendlyID || parsed.success === false)
-    throw new NcaError(status, body || "no referral id in the answer", false);
+    throw new NcaError(status, body || "no referral id in the answer", "uncertain");
   return {
     referralID: String(parsed.referralID ?? ""),
     referralFriendlyID: parsed.referralFriendlyID,

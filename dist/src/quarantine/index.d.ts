@@ -82,10 +82,14 @@ export interface QuarantineRecord {
         };
         attempts?: number;
         last_attempt_at?: string;
-        /** The last failure. `permanent`: the API refused the report itself. */
+        /**
+         * The last failure. `permanent`: not tried again automatically, because
+         * the NCA refused it or because it may have been received (`uncertain`).
+         */
         error?: {
             message: string;
             permanent: boolean;
+            uncertain?: boolean;
             at: string;
         };
         /** Another report already covers this file (same attachment). */
@@ -358,8 +362,9 @@ export declare class Quarantine {
     /**
      * Report one item to the NCA through the API: the fields, a JSON document
      * with everything else held, and the file itself, sent from here. The
-     * reference is then recorded as for any report. Throws `NcaError`; a 400
-     * is kept on the item so it is not tried again automatically.
+     * reference is then recorded as for any report. Throws; the failure is kept
+     * on the item, and only one that certainly was not processed
+     * (`ncaFailureKind` "retry") is tried again automatically.
      */
     submitToNca(id: string, actor: string, config: NcaConfig, app?: AppReportData): Promise<{
         record: QuarantineRecord;
