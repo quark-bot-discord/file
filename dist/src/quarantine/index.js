@@ -47,6 +47,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 export const RETENTION_DAYS = 365;
 /** reg 8: the report reference. */
 export const REFERENCE_RETENTION_DAYS = 5 * 365;
+/** The report register: six years from a case's last change. */
+export const REGISTER_RETENTION_DAYS = 6 * 365;
 const MAGIC = Buffer.from("QZ1");
 /**
  * How urgent the report is, chosen by the person preparing it:
@@ -633,6 +635,24 @@ export class Quarantine {
         await this.logAccess({ actor, action: "read", detail: "references" });
         return out;
     }
+    /** Write (or replace) one case in the report register. */
+    async putRegister(entry, actor) {
+        if (!/^[\w-]{1,100}$/.test(entry.id))
+            throw new Error("Bad register id");
+        await this.putSealed(`register/${entry.id}`, Buffer.from(JSON.stringify(entry)));
+        await this.logAccess({ actor, action: "write_register", id: entry.id });
+    }
+    /** Every case in the report register, oldest first. */
+    async register(actor) {
+        const out = [];
+        for (const name of await this.listNames("register/")) {
+            const plain = await this.getSealed(name);
+            if (plain)
+                out.push(JSON.parse(plain.toString("utf8")));
+        }
+        await this.logAccess({ actor, action: "read", detail: "register" });
+        return out.sort((a, b) => a.opened_at.localeCompare(b.opened_at));
+    }
     /**
      * Delete what has passed its time: items a year after detection (or after
      * the report, if later), references five years after the report, and access
@@ -673,6 +693,16 @@ export class Quarantine {
             await this.remove(name);
             await this.logAccess({ actor, action: "expire_reference", id: kept.id });
             references++;
+        }
+        for (const name of await this.listNames("register/")) {
+            const plain = await this.getSealed(name);
+            if (!plain)
+                continue;
+            const entry = JSON.parse(plain.toString("utf8"));
+            if (Date.parse(addDays(entry.updated_at, REGISTER_RETENTION_DAYS)) > now.getTime())
+                continue;
+            await this.remove(name);
+            await this.logAccess({ actor, action: "expire_register", id: entry.id });
         }
         const cutoff = new Date(now.getTime() - REFERENCE_RETENTION_DAYS * DAY_MS)
             .toISOString()
