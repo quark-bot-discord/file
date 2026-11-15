@@ -217,16 +217,48 @@ export function ncaPayload(item, fields, config) {
         },
     };
 }
+const RETRY_STATUSES = new Set([408, 429, 503]);
+const UNCERTAIN_STATUSES = new Set([401, 403]);
+export function kindOfStatus(status) {
+    if (RETRY_STATUSES.has(status))
+        return "retry";
+    if (UNCERTAIN_STATUSES.has(status) || status >= 500 || (status >= 200 && status < 300))
+        return "uncertain";
+    return "refused";
+}
 export class NcaError extends Error {
-    constructor(status, body, 
-    /** 400: the report itself is wrong; trying again will not help. */
-    permanent) {
+    constructor(status, body, kind = kindOfStatus(status)) {
         super(`NCA API ${status}: ${body.slice(0, 500)}`);
         this.status = status;
         this.body = body;
-        this.permanent = permanent;
         this.name = "NcaError";
+        this.kind = kind;
     }
+    /** Not tried again automatically. */
+    get permanent() {
+        return this.kind !== "retry";
+    }
+}
+/** A failure before anything was sent (e.g. completing the certificate chain). */
+export class NcaNotSentError extends Error {
+    constructor(message, cause) {
+        super(message);
+        this.cause = cause;
+        this.name = "NcaNotSentError";
+    }
+}
+/** Network errors that mean the request never reached the NCA. */
+const NOT_SENT_CODES = new Set(["ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH", "UND_ERR_CONNECT_TIMEOUT"]);
+/** How to treat any error from `submitReferral`. */
+export function ncaFailureKind(error) {
+    if (error?.name === "NcaError")
+        return error.kind;
+    if (error?.name === "NcaNotSentError")
+        return "retry";
+    const code = error?.cause?.code ?? error?.code ?? "";
+    if (NOT_SENT_CODES.has(code) || /^(CERT_|UNABLE_TO_|ERR_TLS_|DEPTH_ZERO|SELF_SIGNED)/.test(code))
+        return "retry";
+    return "uncertain";
 }
 /**
  * The NCA's server sends its certificate without the intermediate that links
@@ -335,7 +367,13 @@ export async function submitReferral(config, payload, files) {
         if (!isIncompleteChain(error))
             throw error;
         const target = new URL(url);
-        const intermediate = await intermediateFor(target.hostname, Number(target.port) || 443);
+        let intermediate;
+        try {
+            intermediate = await intermediateFor(target.hostname, Number(target.port) || 443);
+        }
+        catch (chainError) {
+            throw new NcaNotSentError(`Completing the NCA's certificate chain: ${chainError?.message}`, chainError);
+        }
         const roots = config.rootCertificates ?? (await import("tls")).rootCertificates;
         try {
             ({ status, ok, body } = await postWithCa(url, headers, form(), intermediate, roots));
@@ -347,7 +385,7 @@ export async function submitReferral(config, payload, files) {
         }
     }
     if (!ok)
-        throw new NcaError(status, body, status === 400);
+        throw new NcaError(status, body);
     let parsed = {};
     try {
         parsed = JSON.parse(body);
@@ -356,7 +394,7 @@ export async function submitReferral(config, payload, files) {
         // Handled below.
     }
     if (!parsed.referralFriendlyID || parsed.success === false)
-        throw new NcaError(status, body || "no referral id in the answer", false);
+        throw new NcaError(status, body || "no referral id in the answer", "uncertain");
     return {
         referralID: String(parsed.referralID ?? ""),
         referralFriendlyID: parsed.referralFriendlyID,

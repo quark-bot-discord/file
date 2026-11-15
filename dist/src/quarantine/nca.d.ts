@@ -197,15 +197,34 @@ export interface NcaResult {
     referralFriendlyID: string;
     reportID?: number;
 }
+/**
+ * What a failed attempt means for trying again:
+ * - `retry`: the NCA certainly did not process it (no connection was made,
+ *   or it answered 408, 429 or 503). Tried again automatically.
+ * - `refused`: the NCA rejected the report (400, 404, 413, 415, 422 and other
+ *   client errors). Trying again unchanged will not help.
+ * - `uncertain`: it may have been received. The NCA's API is known to answer
+ *   401 to a report it processed; a 5xx, a dropped connection, a timeout or a
+ *   2xx without a referral number are the same. Not tried again, so it is not
+ *   reported twice: check the portal first.
+ */
+export type NcaFailureKind = "retry" | "refused" | "uncertain";
+export declare function kindOfStatus(status: number): NcaFailureKind;
 export declare class NcaError extends Error {
     readonly status: number;
     readonly body: string;
-    /** 400: the report itself is wrong; trying again will not help. */
-    readonly permanent: boolean;
-    constructor(status: number, body: string, 
-    /** 400: the report itself is wrong; trying again will not help. */
-    permanent: boolean);
+    readonly kind: NcaFailureKind;
+    constructor(status: number, body: string, kind?: NcaFailureKind);
+    /** Not tried again automatically. */
+    get permanent(): boolean;
 }
+/** A failure before anything was sent (e.g. completing the certificate chain). */
+export declare class NcaNotSentError extends Error {
+    readonly cause?: unknown | undefined;
+    constructor(message: string, cause?: unknown | undefined);
+}
+/** How to treat any error from `submitReferral`. */
+export declare function ncaFailureKind(error: unknown): NcaFailureKind;
 /** The intermediate that issued `host`'s certificate, as PEM, from its CA Issuers address. */
 export declare function intermediateFor(host: string, port?: number, fetchImpl?: typeof fetch): Promise<string>;
 /** POSTs one referral. The file and the JSON document go as `uploadedFiles`. */

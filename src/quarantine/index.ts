@@ -54,8 +54,8 @@ import exifr from "exifr";
 import sharp from "sharp";
 import type { Detection } from "../scan/scanner.js";
 import {
+  ncaFailureKind,
   ncaPayload,
-  NcaError,
   submitReferral,
   type NcaConfig,
   type NcaResult,
@@ -134,8 +134,11 @@ export interface QuarantineRecord {
     paused?: { reason: string; set_by: string; set_at: string };
     attempts?: number;
     last_attempt_at?: string;
-    /** The last failure. `permanent`: the API refused the report itself. */
-    error?: { message: string; permanent: boolean; at: string };
+    /**
+     * The last failure. `permanent`: not tried again automatically, because
+     * the NCA refused it or because it may have been received (`uncertain`).
+     */
+    error?: { message: string; permanent: boolean; uncertain?: boolean; at: string };
     /** Another report already covers this file (same attachment). */
     covered_by?: string;
   };
@@ -758,6 +761,8 @@ export class Quarantine {
   autoReportBlocker(record: QuarantineSummary, others: QuarantineSummary[] = []): string | null {
     if (record.report) return "already reported";
     if (record.nca?.paused) return `paused: ${record.nca.paused.reason}`;
+    if (record.nca?.error?.uncertain)
+      return `the last attempt may have reached the NCA (${record.nca.error.message}). Check "Previously submitted reports" on the portal: if it is there, record its reference; if not, use Report to the NCA now`;
     if (record.nca?.error?.permanent) return `the NCA refused it: ${record.nca.error.message}`;
     if (record.intake && !record.intake.auto_report) return "recorded for a decision by hand";
     if (!record.intake && record.detection.category !== "csam")
@@ -780,8 +785,9 @@ export class Quarantine {
   /**
    * Report one item to the NCA through the API: the fields, a JSON document
    * with everything else held, and the file itself, sent from here. The
-   * reference is then recorded as for any report. Throws `NcaError`; a 400
-   * is kept on the item so it is not tried again automatically.
+   * reference is then recorded as for any report. Throws; the failure is kept
+   * on the item, and only one that certainly was not processed
+   * (`ncaFailureKind` "retry") is tried again automatically.
    */
   async submitToNca(
     id: string,
@@ -815,9 +821,9 @@ export class Quarantine {
     try {
       result = await submitReferral(config, payload, files);
     } catch (error) {
-      const permanent = error instanceof NcaError && error.permanent;
+      const kind = ncaFailureKind(error);
       const message = (error as Error)?.message?.slice(0, 500) ?? String(error);
-      record.nca.error = { message, permanent, at };
+      record.nca.error = { message, permanent: kind !== "retry", ...(kind === "uncertain" ? { uncertain: true } : {}), at };
       await this.writeRecord(record);
       await this.logAccess({ actor, action: "submit_nca_failed", id, detail: message.slice(0, 200) });
       throw error;
