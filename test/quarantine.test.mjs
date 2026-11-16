@@ -736,7 +736,7 @@ function ncaFetch(answer) {
     calls.push({
       url,
       headers: init.headers,
-      submission: JSON.parse(await form.get("submission").text()),
+      submission: JSON.parse(form.get("submission")),
       files: form.getAll("uploadedFiles").map((f) => ({ name: f.name, size: f.size })),
     });
     return typeof answer === "function" ? answer() : answer;
@@ -795,7 +795,7 @@ test("NCA: a 400 is kept on the item and stops automatic reporting; a 5xx does n
 test("NCA: only failures the NCA certainly did not process are retried", async () => {
   const cases = [
     [408, "retry"], [429, "retry"], [503, "retry"],
-    [401, "uncertain"], [403, "uncertain"], [500, "uncertain"], [502, "uncertain"], [504, "uncertain"],
+    [401, "refused"], [403, "refused"], [500, "uncertain"], [502, "uncertain"], [504, "uncertain"],
     [400, "refused"], [404, "refused"], [413, "refused"], [415, "refused"], [422, "refused"],
   ];
   for (const [status, kind] of cases) {

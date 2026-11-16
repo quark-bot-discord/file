@@ -218,11 +218,10 @@ export function ncaPayload(item, fields, config) {
     };
 }
 const RETRY_STATUSES = new Set([408, 429, 503]);
-const UNCERTAIN_STATUSES = new Set([401, 403]);
 export function kindOfStatus(status) {
     if (RETRY_STATUSES.has(status))
         return "retry";
-    if (UNCERTAIN_STATUSES.has(status) || status >= 500 || (status >= 200 && status < 300))
+    if (status >= 500 || (status >= 200 && status < 300))
         return "uncertain";
     return "refused";
 }
@@ -343,7 +342,8 @@ async function postWithCa(url, headers, form, extraCa, roots) {
 export async function submitReferral(config, payload, files) {
     const form = () => {
         const f = new FormData();
-        f.append("submission", new Blob([JSON.stringify(payload)], { type: "application/json" }));
+        // The NCA wants the JSON as a text field, not a file part (NCA support, 16/11/2026).
+        f.append("submission", JSON.stringify(payload));
         for (const file of files)
             f.append("uploadedFiles", new Blob([new Uint8Array(file.bytes)], { type: file.type }), file.name);
         return f;

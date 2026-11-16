@@ -203,10 +203,14 @@ export interface NcaResult {
  *   or it answered 408, 429 or 503). Tried again automatically.
  * - `refused`: the NCA rejected the report (400, 404, 413, 415, 422 and other
  *   client errors). Trying again unchanged will not help.
- * - `uncertain`: it may have been received. The NCA's API is known to answer
- *   401 to a report it processed; a 5xx, a dropped connection, a timeout or a
- *   2xx without a referral number are the same. Not tried again, so it is not
- *   reported twice: check the portal first.
+ * - `uncertain`: it may have been received: a 5xx except 503, a dropped
+ *   connection, a timeout, or a 2xx without a referral number. Not tried
+ *   again, so it is not reported twice: check the portal first.
+ *
+ * 401 and 403 count as `refused`. The NCA's API checks the key before the
+ * report, and until its next release answers 401 when the real problem is the
+ * report's data mapping (NCA support, 16/11/2026); either way nothing was
+ * received, and retrying unchanged will not help.
  */
 export type NcaFailureKind = "retry" | "refused" | "uncertain";
 export declare function kindOfStatus(status: number): NcaFailureKind;

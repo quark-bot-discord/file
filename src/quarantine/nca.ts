@@ -290,19 +290,22 @@ export interface NcaResult {
  *   or it answered 408, 429 or 503). Tried again automatically.
  * - `refused`: the NCA rejected the report (400, 404, 413, 415, 422 and other
  *   client errors). Trying again unchanged will not help.
- * - `uncertain`: it may have been received. The NCA's API is known to answer
- *   401 to a report it processed; a 5xx, a dropped connection, a timeout or a
- *   2xx without a referral number are the same. Not tried again, so it is not
- *   reported twice: check the portal first.
+ * - `uncertain`: it may have been received: a 5xx except 503, a dropped
+ *   connection, a timeout, or a 2xx without a referral number. Not tried
+ *   again, so it is not reported twice: check the portal first.
+ *
+ * 401 and 403 count as `refused`. The NCA's API checks the key before the
+ * report, and until its next release answers 401 when the real problem is the
+ * report's data mapping (NCA support, 16/11/2026); either way nothing was
+ * received, and retrying unchanged will not help.
  */
 export type NcaFailureKind = "retry" | "refused" | "uncertain";
 
 const RETRY_STATUSES = new Set([408, 429, 503]);
-const UNCERTAIN_STATUSES = new Set([401, 403]);
 
 export function kindOfStatus(status: number): NcaFailureKind {
   if (RETRY_STATUSES.has(status)) return "retry";
-  if (UNCERTAIN_STATUSES.has(status) || status >= 500 || (status >= 200 && status < 300)) return "uncertain";
+  if (status >= 500 || (status >= 200 && status < 300)) return "uncertain";
   return "refused";
 }
 
@@ -440,7 +443,8 @@ export async function submitReferral(
 ): Promise<NcaResult> {
   const form = () => {
     const f = new FormData();
-    f.append("submission", new Blob([JSON.stringify(payload)], { type: "application/json" }));
+    // The NCA wants the JSON as a text field, not a file part (NCA support, 16/11/2026).
+    f.append("submission", JSON.stringify(payload));
     for (const file of files) f.append("uploadedFiles", new Blob([new Uint8Array(file.bytes)], { type: file.type }), file.name);
     return f;
   };
