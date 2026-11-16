@@ -66,7 +66,7 @@ test("an incomplete chain: the intermediate is fetched and the report is sent, v
     assert.equal(received[0].key, "k");
     assert.equal(received[0].org, "o");
     assert.match(received[0].type, /^multipart\/form-data; boundary=/);
-    assert.match(received[0].body, /name="submission"/);
+    assert.match(received[0].body, /name="submission"\r\n\r\n\{"hello":1\}/, "the JSON goes as a text field, not a file");
     assert.match(received[0].body, /filename="quark-report.json"/);
   } finally {
     close();
