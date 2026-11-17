@@ -940,3 +940,29 @@ test("NCA payload: date-times as in the NCA's examples, phone numbers as digits"
   for (const d of dates) assert.match(d, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/, d);
   assert.match(json, /All dates and times in this report are UTC/);
 });
+
+test("Check with the NCA: four invalid probes, never the reported file, logged", async () => {
+  const { quarantine } = storeAt({ t: Date.parse("2026-11-05T10:05:00Z") });
+  const id = await quarantine.put({ detection: detection({ category: "csam" }), content: Buffer.from("SECRET-IMAGE-BYTES"), subject: {} });
+  const seen = [];
+  const fetchImpl = async (url, init) => {
+    const form = init.body;
+    const sub = form.get("submission");
+    const text = typeof sub === "string" ? sub : await sub.text();
+    const files = form.getAll("uploadedFiles");
+    for (const f of files) assert.ok(!(await f.text()).includes("SECRET-IMAGE-BYTES"), "the reported file is never sent");
+    seen.push({ type: typeof sub === "string" ? "text" : sub.type, priority: JSON.parse(text).priorityId, files: files.map((f) => f.name) });
+    return new Response(JSON.stringify({ status: 400, message: "[$.priorityId: does not have a value in the enumeration [1, 2, 3]]" }), { status: 400 });
+  };
+  const probes = await quarantine.checkWithNca(id, "admin:1", { ...NCA, fetchImpl });
+  assert.deepEqual(probes.map((p) => [p.step, p.status]), [["key", 400], ["report as text", 400], ["report as JSON part", 400], ["with quark-report.json", 400]]);
+  assert.match(probes[0].meaning, /key is accepted/);
+  assert.match(probes[1].meaning, /could read the report/);
+  assert.deepEqual(seen.map((s) => s.priority), [undefined, "0", "0", "0"], "every report probe is invalid on purpose");
+  assert.deepEqual(seen.map((s) => s.type), ["text", "text", "application/json", "text"]);
+  assert.deepEqual(seen[3].files, ["quark-report.json"]);
+  const [rec] = await quarantine.list("admin:1");
+  assert.equal(rec.report, undefined, "nothing reported");
+  const log = await quarantine.accessLog("admin:1");
+  assert.ok(log.some((e) => e.action === "check_nca" && e.detail.includes("key: 400")));
+});

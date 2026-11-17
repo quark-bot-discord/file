@@ -56,6 +56,8 @@ import type { Detection } from "../scan/scanner.js";
 import {
   ncaFailureKind,
   ncaPayload,
+  probeNca,
+  type NcaProbe,
   submitReferral,
   type NcaConfig,
   type NcaResult,
@@ -218,6 +220,7 @@ export interface AccessEntry {
     | "set_auto_report"
     | "delete_unreported"
     | "set_nca_api_key"
+    | "check_nca"
     | "write_register"
     | "expire_register";
   id?: string;
@@ -836,6 +839,29 @@ export class Quarantine {
    * on the item, and only one that certainly was not processed
    * (`ncaFailureKind` "retry") is tried again automatically.
    */
+  /**
+   * Ask the NCA whether it accepts the key and can read this item's report,
+   * without reporting anything (see `probeNca`). The reported file is never
+   * sent. Logged as `check_nca`.
+   */
+  async checkWithNca(id: string, actor: string, config: NcaConfig, app: AppReportData = {}): Promise<NcaProbe[]> {
+    const item = await this.readItem(id);
+    const fields = await this.fieldsFor(item, app);
+    const payload = ncaPayload(item, fields, config) as Record<string, unknown>;
+    const probes = await probeNca(config, payload, {
+      name: "quark-report.json",
+      type: "application/json",
+      bytes: Buffer.from(JSON.stringify(fields, null, 2)),
+    });
+    await this.logAccess({
+      actor,
+      action: "check_nca",
+      id,
+      detail: probes.map((p) => `${p.step}: ${p.status ?? "unreachable"}`).join("; "),
+    });
+    return probes;
+  }
+
   async submitToNca(
     id: string,
     actor: string,

@@ -236,10 +236,46 @@ export declare class NcaNotSentError extends Error {
 export declare function ncaFailureKind(error: unknown): NcaFailureKind;
 /** The intermediate that issued `host`'s certificate, as PEM, from its CA Issuers address. */
 export declare function intermediateFor(host: string, port?: number, fetchImpl?: typeof fetch): Promise<string>;
+/** How the `submission` field is encoded: plain text (as NCA support asked), or a JSON part. */
+export type SubmissionEncoding = "text" | "json";
+/** One POST to the referral endpoint; the raw answer, whatever its status. */
+export declare function postReferral(config: NcaConfig, payload: unknown, files: {
+    name: string;
+    type: string;
+    bytes: Buffer;
+}[], encoding?: SubmissionEncoding): Promise<{
+    status: number;
+    ok: boolean;
+    body: string;
+}>;
 /** POSTs one referral. The file and the JSON document go as `uploadedFiles`. */
 export declare function submitReferral(config: NcaConfig, payload: unknown, files: {
     name: string;
     type: string;
     bytes: Buffer;
-}[]): Promise<NcaResult>;
+}[], encoding?: SubmissionEncoding): Promise<NcaResult>;
+/** One probe of `checkWithNca`. */
+export interface NcaProbe {
+    step: string;
+    sent: string;
+    status: number | null;
+    body: string;
+    meaning: string;
+}
+/**
+ * Find out, without reporting anything, whether the NCA accepts the key and
+ * can read a report. Every probe is invalid on purpose, so none can create a
+ * referral, and none carries the reported file:
+ *  1. `{}` (missing required fields): 400 means the key is good; 401, the key.
+ *  2. The real report with priorityId "0" and no files, as text, then
+ *  3. as a JSON part: a 400 listing errors means the NCA read it (the list is
+ *     what to fix besides the priority); a 401 means it could not read it.
+ *  4. As 2, with quark-report.json attached: does the extra file break it?
+ * Until the NCA's next release a 401 also stands for "could not read the data".
+ */
+export declare function probeNca(config: NcaConfig, payload: Record<string, unknown>, reportJson: {
+    name: string;
+    type: string;
+    bytes: Buffer;
+}): Promise<NcaProbe[]>;
 export {};
