@@ -924,3 +924,19 @@ test("the register keeps a case sealed, survives its items, and expires after si
   assert.equal((await quarantine.register("admin:1")).length, 0, "gone after six years");
   assert.ok((await quarantine.accessLog("admin:1")).some((e) => e.action === "expire_register"));
 });
+
+test("NCA payload: date-times as in the NCA's examples, phone numbers as digits", async () => {
+  const { phoneOf } = await import("../dist/src/quarantine/nca.js");
+  assert.deepEqual(phoneOf("07700 900123", "+44"), { countryCallingCode: "+44", value: "7700900123" });
+  assert.deepEqual(phoneOf("+44 7700 900123", "+44"), { countryCallingCode: "+44", value: "7700900123" });
+  assert.deepEqual(phoneOf("+1 (555) 010-9999"), { countryCallingCode: "", value: "15550109999" });
+  const { quarantine } = storeAt({ t: Date.parse("2026-11-05T10:05:00Z") });
+  const id = await quarantine.put({ detection: detection({ category: "csam" }), content: Buffer.from("x"), subject: {} });
+  const { fetchImpl, calls } = ncaFetch(() => new Response(JSON.stringify({ referralID: "r", referralFriendlyID: "SR-1" }), { status: 201 }));
+  await quarantine.submitToNca(id, "admin:1", { ...NCA, fetchImpl });
+  const json = JSON.stringify(calls[0].submission);
+  const dates = [...json.matchAll(/"(?:incidentDateTime|uploadedDateTime|verificationDate|dateTime|dateOfBirth|billingDateOfBirth|dateAccountClosed)":"([^"]+)"/g)].map((m) => m[1]);
+  assert.ok(dates.length > 0);
+  for (const d of dates) assert.match(d, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/, d);
+  assert.match(json, /All dates and times in this report are UTC/);
+});

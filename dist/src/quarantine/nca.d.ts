@@ -40,6 +40,11 @@ export declare function priorityIdOf(level: Priority | null | undefined): "1" | 
 /** How the content came to light, in the API's words. */
 export type DetectionMethod = "A user of the platform" | "A third party reporter" | "An automated detection tool" | "An employee moderating the platform";
 export declare function methodOf(item: QuarantineItem): DetectionMethod;
+/** A phone number as the schema's "digits", with its calling code apart if given. */
+export declare function phoneOf(raw: string, defaultCode?: string): {
+    countryCallingCode: string;
+    value: string;
+};
 type Fields = ReturnType<typeof reportFieldsOf>;
 /**
  * The SubmissionPayload for one item. `previousReferences` are the NCA
@@ -103,10 +108,10 @@ export declare function ncaPayload(item: QuarantineItem, fields: Fields, config:
                 };
                 phones: {
                     phone: {
-                        value: string;
-                        countryCallingCode: string;
                         verified: boolean;
                         verificationDate: string;
+                        countryCallingCode: string;
+                        value: string;
                     }[];
                 };
                 addresses: {

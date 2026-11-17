@@ -93,10 +93,31 @@ export function methodOf(item: QuarantineItem): DetectionMethod {
 
 const NOT_HELD = "Data not held";
 const text = (v: unknown) => (typeof v === "string" ? v : "");
+/**
+ * A date-time as in every example in the NCA's schema: `yyyy-MM-ddTHH:mm:ss`,
+ * no milliseconds or zone (its parser rejects `.000Z` despite the docs).
+ * Always UTC; the report says so in its additional information.
+ */
 const iso = (v: unknown) => {
   const t = typeof v === "string" ? Date.parse(v) : NaN;
-  return Number.isNaN(t) ? "" : new Date(t).toISOString();
+  return Number.isNaN(t) ? "" : new Date(t).toISOString().slice(0, 19);
 };
+
+/** A phone number as the schema's "digits", with its calling code apart if given. */
+export function phoneOf(raw: string, defaultCode = ""): { countryCallingCode: string; value: string } {
+  const trimmed = raw.trim();
+  let digits = trimmed.replace(/\D/g, "");
+  const code = defaultCode.replace(/\D/g, "");
+  if (trimmed.startsWith("+")) {
+    // "+44 7700 900123": the code is in the number; split it off if it is ours.
+    if (code && digits.startsWith(code)) digits = digits.slice(code.length);
+    else return { countryCallingCode: "", value: digits };
+  } else if (code && digits.startsWith("0")) {
+    // "07700 900123" with +44: the trunk 0 is not dialled after the code.
+    digits = digits.slice(1);
+  }
+  return { countryCallingCode: defaultCode, value: digits };
+}
 
 function addressesOf(records: BillingRecord[] | null | undefined) {
   const out: Record<string, string>[] = [];
@@ -166,7 +187,7 @@ export function ncaPayload(item: QuarantineItem, fields: Fields, config: NcaConf
           profileUrl: user.profile_url ? [user.profile_url] : [],
           additionalEmails: [],
           emails: { email: emails.map((value) => ({ value, verified: false, verificationDate: "" })) },
-          phones: { phone: phones.map((value) => ({ value, countryCallingCode: "", verified: false, verificationDate: "" })) },
+          phones: { phone: phones.map((raw) => ({ ...phoneOf(raw), verified: false, verificationDate: "" })) },
           addresses: { address: [] },
           billingAddress: { address: addressesOf(billing) },
           recoveryEmail: { email: [{ value: NOT_HELD }] },
@@ -246,6 +267,7 @@ export function ncaPayload(item: QuarantineItem, fields: Fields, config: NcaConf
         where.discord_message_id && `Discord message ID: ${where.discord_message_id}`,
         where.discord_attachment_id && `Discord attachment ID: ${where.discord_attachment_id}`,
         `Detected by Quark: ${item.detected_at}`,
+        "All dates and times in this report are UTC.",
         ...fields.not_available.map((n) => `Not available: ${n}`),
         "Everything else Quark holds, including the user's relevant data from the two weeks before, is attached as quark-report.json.",
       ]),
@@ -268,7 +290,7 @@ export function ncaPayload(item: QuarantineItem, fields: Fields, config: NcaConf
         lastName: config.reporter.lastName,
         phones: {
           phone: config.reporter.phone
-            ? [{ countryCallingCode: config.reporter.phoneCountryCode, value: config.reporter.phone }]
+            ? [phoneOf(config.reporter.phone, config.reporter.phoneCountryCode)]
             : [],
         },
         emails: { email: [{ value: config.reporter.email }] },
