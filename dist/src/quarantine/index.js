@@ -41,7 +41,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, } from "cryp
 import { DeleteObjectCommand, GetObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client, } from "@aws-sdk/client-s3";
 import exifr from "exifr";
 import sharp from "sharp";
-import { ncaFailureKind, ncaPayload, submitReferral, } from "./nca.js";
+import { ncaFailureKind, ncaPayload, probeNca, submitReferral, } from "./nca.js";
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** reg 8: content, report, basis and relevant data. */
 export const RETENTION_DAYS = 365;
@@ -529,6 +529,28 @@ export class Quarantine {
      * on the item, and only one that certainly was not processed
      * (`ncaFailureKind` "retry") is tried again automatically.
      */
+    /**
+     * Ask the NCA whether it accepts the key and can read this item's report,
+     * without reporting anything (see `probeNca`). The reported file is never
+     * sent. Logged as `check_nca`.
+     */
+    async checkWithNca(id, actor, config, app = {}) {
+        const item = await this.readItem(id);
+        const fields = await this.fieldsFor(item, app);
+        const payload = ncaPayload(item, fields, config);
+        const probes = await probeNca(config, payload, {
+            name: "quark-report.json",
+            type: "application/json",
+            bytes: Buffer.from(JSON.stringify(fields, null, 2)),
+        });
+        await this.logAccess({
+            actor,
+            action: "check_nca",
+            id,
+            detail: probes.map((p) => `${p.step}: ${p.status ?? "unreachable"}`).join("; "),
+        });
+        return probes;
+    }
     async submitToNca(id, actor, config, app = {}) {
         const record = await this.readRecord(id);
         if (record.report)

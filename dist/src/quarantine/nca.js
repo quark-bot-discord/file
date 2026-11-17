@@ -362,21 +362,21 @@ async function postWithCa(url, headers, form, extraCa, roots) {
         request.end(body);
     });
 }
-/** POSTs one referral. The file and the JSON document go as `uploadedFiles`. */
-export async function submitReferral(config, payload, files) {
+/** One POST to the referral endpoint; the raw answer, whatever its status. */
+export async function postReferral(config, payload, files, encoding = "text") {
     const form = () => {
         const f = new FormData();
         // The NCA wants the JSON as a text field, not a file part (NCA support, 16/11/2026).
-        f.append("submission", JSON.stringify(payload));
+        if (encoding === "text")
+            f.append("submission", JSON.stringify(payload));
+        else
+            f.append("submission", new Blob([JSON.stringify(payload)], { type: "application/json" }));
         for (const file of files)
             f.append("uploadedFiles", new Blob([new Uint8Array(file.bytes)], { type: file.type }), file.name);
         return f;
     };
     const url = `${config.baseUrl}/api/referral/`;
     const headers = { "X-API-KEY": config.apiKey, orgId: config.orgId };
-    let status;
-    let ok;
-    let body;
     try {
         const response = await (config.fetchImpl ?? fetch)(url, {
             method: "POST",
@@ -384,8 +384,7 @@ export async function submitReferral(config, payload, files) {
             body: form(),
             signal: AbortSignal.timeout(120000),
         });
-        ({ status, ok } = response);
-        body = await response.text().catch(() => "");
+        return { status: response.status, ok: response.ok, body: await response.text().catch(() => "") };
     }
     catch (error) {
         if (!isIncompleteChain(error))
@@ -400,7 +399,7 @@ export async function submitReferral(config, payload, files) {
         }
         const roots = config.rootCertificates ?? (await import("tls")).rootCertificates;
         try {
-            ({ status, ok, body } = await postWithCa(url, headers, form(), intermediate, roots));
+            return await postWithCa(url, headers, form(), intermediate, roots);
         }
         catch (retryError) {
             // The NCA may have moved to another intermediate: fetch it afresh next time.
@@ -408,6 +407,10 @@ export async function submitReferral(config, payload, files) {
             throw retryError;
         }
     }
+}
+/** POSTs one referral. The file and the JSON document go as `uploadedFiles`. */
+export async function submitReferral(config, payload, files, encoding = "text") {
+    const { status, ok, body } = await postReferral(config, payload, files, encoding);
     if (!ok)
         throw new NcaError(status, body);
     let parsed = {};
@@ -424,5 +427,50 @@ export async function submitReferral(config, payload, files) {
         referralFriendlyID: parsed.referralFriendlyID,
         reportID: parsed.reportID,
     };
+}
+/** A priorityId outside the enumeration: the NCA must reject any report carrying it. */
+const INVALID_PRIORITY = "0";
+/**
+ * Find out, without reporting anything, whether the NCA accepts the key and
+ * can read a report. Every probe is invalid on purpose, so none can create a
+ * referral, and none carries the reported file:
+ *  1. `{}` (missing required fields): 400 means the key is good; 401, the key.
+ *  2. The real report with priorityId "0" and no files, as text, then
+ *  3. as a JSON part: a 400 listing errors means the NCA read it (the list is
+ *     what to fix besides the priority); a 401 means it could not read it.
+ *  4. As 2, with quark-report.json attached: does the extra file break it?
+ * Until the NCA's next release a 401 also stands for "could not read the data".
+ */
+export async function probeNca(config, payload, reportJson) {
+    const invalid = { ...payload, priorityId: INVALID_PRIORITY };
+    const probes = [
+        ["key", "an empty report, {}", {}, [], "text"],
+        ["report as text", 'the real report with priorityId "0", no files, submission as a text field', invalid, [], "text"],
+        ["report as JSON part", 'the same, submission as an application/json part', invalid, [], "json"],
+        ["with quark-report.json", 'the same as text, with quark-report.json attached (never the reported file)', invalid, [reportJson], "text"],
+    ];
+    const out = [];
+    for (const [step, sent, body, files, encoding] of probes) {
+        try {
+            // eslint-disable-next-line no-await-in-loop
+            const answer = await postReferral(config, body, files, encoding);
+            out.push({ step, sent, status: answer.status, body: answer.body.slice(0, 2000), meaning: meaningOf(step, answer.status) });
+        }
+        catch (error) {
+            out.push({ step, sent, status: null, body: `${error?.message ?? error}`.slice(0, 500), meaning: "Could not reach the NCA." });
+        }
+    }
+    return out;
+}
+function meaningOf(step, status) {
+    if (status >= 200 && status < 300)
+        return "The NCA ACCEPTED this test, which it should not have. Tell NCA support its referral number (in the answer) so they can discard it.";
+    if (step === "key")
+        return status === 401 ? "The NCA refused the API key (or could not read even an empty report)." : status === 400 ? "The API key is accepted." : `Unexpected answer ${status}.`;
+    if (status === 400)
+        return "The NCA could read the report. Everything listed in the answer, other than priorityId, needs fixing.";
+    if (status === 401)
+        return "The NCA could not read the report in this form (its API answers 401 for this).";
+    return `Unexpected answer ${status}.`;
 }
 //# sourceMappingURL=nca.js.map
