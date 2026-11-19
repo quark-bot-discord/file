@@ -863,6 +863,7 @@ export class Quarantine {
       type: "application/json",
       bytes: Buffer.from(JSON.stringify(fields, null, 2)),
     });
+    listFiles(payload as Record<string, unknown>, files, this.now());
     const at = this.now().toISOString();
     record.nca = { ...record.nca, attempts: (record.nca?.attempts ?? 0) + 1, last_attempt_at: at };
     let result: NcaResult;
@@ -1367,6 +1368,34 @@ export function quarantineFromEnv(
     key,
   });
 }
+/**
+ * One `uploadedFile` entry per attached file, in the same order, with the
+ * attached file's name as `originalFilename`, as in the NCA's sample payload.
+ * The reported file's entry is the one `ncaPayload` built; quark-report.json
+ * gets its own.
+ */
+function listFiles(payload: Record<string, unknown>, files: { name: string; bytes: Buffer }[], now: Date) {
+  const info = (payload as { reportedInformation: { uploadedFiles: { uploadedFile: Record<string, unknown>[] } } })
+    .reportedInformation.uploadedFiles;
+  const built = info.uploadedFile;
+  info.uploadedFile = files.map((file, i) => {
+    const sha256 = createHash("sha256").update(file.bytes).digest("hex");
+    if (file.name !== "quark-report.json" && built[i]) return { ...built[i], originalFilename: file.name };
+    return {
+      originalFilename: file.name,
+      uploadedDateTime: now.toISOString().slice(0, 19),
+      ipAddress: "Data not held",
+      potentialMeme: false,
+      links: { link: [{ href: "Data not held", rel: "URL of content" }] },
+      originalFileHashes: { originalFileHash: [{ value: `SHA-256: ${sha256}` }] },
+      sourceInformation: { sourceCapture: [{ captureType: "IP address", value: "", eventName: "LOGIN", dateTime: "" }] },
+      additionalInformation: [
+        { value: "Not reported content: Quark's record of everything it holds that relates to this report, as JSON." },
+      ],
+    };
+  });
+}
+
 function statusOf(record: NcaApiKeyRecord): NcaApiKeyStatus {
   return {
     set_at: record.set_at,

@@ -954,3 +954,17 @@ test("NCA API key: what is saved on the dashboard is what goes in X-API-KEY, byt
   assert.equal(headers.get("x-api-key"), key);
   assert.equal(headers.get("orgid"), NCA.orgId);
 });
+
+test("NCA submission: one uploadedFile entry per attached file, named as attached", async () => {
+  const { quarantine } = storeAt({ t: Date.parse("2026-11-19T10:00:00Z") });
+  const id = await quarantine.put({ detection: detection({ category: "csam" }), content: Buffer.from("x"), subject: {} });
+  const { fetchImpl, calls } = ncaFetch(() => new Response(JSON.stringify({ referralID: "r", referralFriendlyID: "SR-1" }), { status: 201 }));
+  await quarantine.submitToNca(id, "admin:1", { ...NCA, fetchImpl });
+  const listed = calls[0].submission.reportedInformation.uploadedFiles.uploadedFile.map((f) => f.originalFilename);
+  const attached = calls[0].files.map((f) => f.name);
+  assert.deepEqual(listed, attached);
+  assert.equal(attached.at(-1), "quark-report.json");
+  const json = calls[0].submission.reportedInformation.uploadedFiles.uploadedFile.at(-1);
+  assert.match(json.originalFileHashes.originalFileHash[0].value, /^SHA-256: [0-9a-f]{64}$/);
+  assert.match(json.uploadedDateTime, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/);
+});
