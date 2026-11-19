@@ -41,7 +41,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, } from "cryp
 import { DeleteObjectCommand, GetObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client, } from "@aws-sdk/client-s3";
 import exifr from "exifr";
 import sharp from "sharp";
-import { ncaFailureKind, ncaPayload, probeNca, submitReferral, } from "./nca.js";
+import { ncaFailureKind, ncaPayload, submitReferral, } from "./nca.js";
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** reg 8: content, report, basis and relevant data. */
 export const RETENTION_DAYS = 365;
@@ -529,28 +529,6 @@ export class Quarantine {
      * on the item, and only one that certainly was not processed
      * (`ncaFailureKind` "retry") is tried again automatically.
      */
-    /**
-     * Ask the NCA whether it accepts the key and can read this item's report,
-     * without reporting anything (see `probeNca`). The reported file is never
-     * sent. Logged as `check_nca`.
-     */
-    async checkWithNca(id, actor, config, app = {}) {
-        const item = await this.readItem(id);
-        const fields = await this.fieldsFor(item, app);
-        const payload = ncaPayload(item, fields, config);
-        const probes = await probeNca(config, payload, {
-            name: "quark-report.json",
-            type: "application/json",
-            bytes: Buffer.from(JSON.stringify(fields, null, 2)),
-        });
-        await this.logAccess({
-            actor,
-            action: "check_nca",
-            id,
-            detail: probes.map((p) => `${p.step}: ${p.status ?? "unreachable"}`).join("; "),
-        });
-        return probes;
-    }
     async submitToNca(id, actor, config, app = {}) {
         const record = await this.readRecord(id);
         if (record.report)
@@ -573,6 +551,7 @@ export class Quarantine {
             type: "application/json",
             bytes: Buffer.from(JSON.stringify(fields, null, 2)),
         });
+        listFiles(payload, files, this.now());
         const at = this.now().toISOString();
         record.nca = { ...record.nca, attempts: (record.nca?.attempts ?? 0) + 1, last_attempt_at: at };
         let result;
@@ -983,6 +962,34 @@ export function quarantineFromEnv(env = process.env) {
         }),
         bucket,
         key,
+    });
+}
+/**
+ * One `uploadedFile` entry per attached file, in the same order, with the
+ * attached file's name as `originalFilename`, as in the NCA's sample payload.
+ * The reported file's entry is the one `ncaPayload` built; quark-report.json
+ * gets its own.
+ */
+function listFiles(payload, files, now) {
+    const info = payload
+        .reportedInformation.uploadedFiles;
+    const built = info.uploadedFile;
+    info.uploadedFile = files.map((file, i) => {
+        const sha256 = createHash("sha256").update(file.bytes).digest("hex");
+        if (file.name !== "quark-report.json" && built[i])
+            return { ...built[i], originalFilename: file.name };
+        return {
+            originalFilename: file.name,
+            uploadedDateTime: now.toISOString().slice(0, 19),
+            ipAddress: "Data not held",
+            potentialMeme: false,
+            links: { link: [{ href: "Data not held", rel: "URL of content" }] },
+            originalFileHashes: { originalFileHash: [{ value: `SHA-256: ${sha256}` }] },
+            sourceInformation: { sourceCapture: [{ captureType: "IP address", value: "", eventName: "LOGIN", dateTime: "" }] },
+            additionalInformation: [
+                { value: "Not reported content: Quark's record of everything it holds that relates to this report, as JSON." },
+            ],
+        };
     });
 }
 function statusOf(record) {

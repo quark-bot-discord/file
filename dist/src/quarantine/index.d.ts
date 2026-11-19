@@ -1,5 +1,5 @@
 import type { Detection } from "../scan/scanner.js";
-import { type NcaProbe, type NcaConfig, type NcaResult } from "./nca.js";
+import { type NcaConfig, type NcaResult } from "./nca.js";
 /** reg 8: content, report, basis and relevant data. */
 export declare const RETENTION_DAYS = 365;
 /** reg 8: the report reference. */
@@ -409,12 +409,6 @@ export declare class Quarantine {
      * on the item, and only one that certainly was not processed
      * (`ncaFailureKind` "retry") is tried again automatically.
      */
-    /**
-     * Ask the NCA whether it accepts the key and can read this item's report,
-     * without reporting anything (see `probeNca`). The reported file is never
-     * sent. Logged as `check_nca`.
-     */
-    checkWithNca(id: string, actor: string, config: NcaConfig, app?: AppReportData): Promise<NcaProbe[]>;
     submitToNca(id: string, actor: string, config: NcaConfig, app?: AppReportData): Promise<{
         record: QuarantineRecord;
         result: NcaResult;
