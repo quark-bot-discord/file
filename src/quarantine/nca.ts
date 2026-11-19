@@ -168,6 +168,61 @@ export function ncaPayload(item: QuarantineItem, fields: Fields, config: NcaConf
   const info = (lines: (string | null | undefined | false)[]) =>
     lines.filter((l): l is string => !!l).map((value) => ({ value: value.slice(0, 4000) }));
 
+  // The NCA's example never leaves a list empty: where nothing is held it has
+  // one entry saying so ("Data not held"), or one blank entry. Do the same,
+  // in case their mapper reads the first entry of a list without checking.
+  const noEmail = [{ value: NOT_HELD, verified: false, verificationDate: "" }];
+  const noPhone = [{ value: NOT_HELD, countryCallingCode: "", verified: false, verificationDate: "" }];
+  const noCapture = [{ captureType: "IP address", value: "", eventName: "LOGIN", dateTime: "" }];
+  const notHeldPerson = (senderStatus: "sender" | "recipient") => ({
+    firstName: "",
+    middleName: "",
+    lastName: "",
+    senderStatus,
+    screenName: NOT_HELD,
+    espUserId: "",
+    ipAddress: NOT_HELD,
+    dateOfBirth: "",
+    billingDateOfBirth: "",
+    billingName: NOT_HELD,
+    dateAccountClosed: "",
+    accountClosed: false,
+    userNotifiedOfAccountcloser: false,
+    profileUrl: [NOT_HELD],
+    additionalEmails: [{ email: [{ value: "" }] }],
+    emails: { email: noEmail },
+    phones: { phone: noPhone },
+    addresses: { address: [] },
+    billingAddress: { address: [] },
+    recoveryEmail: { email: [{ value: NOT_HELD }] },
+    recoveryPhoneNumber: { phone: [{ value: "", countryCallingCode: "" }] },
+    sourceInformation: { sourceCapture: noCapture },
+    additionalInformation: [
+      {
+        value:
+          senderStatus === "recipient"
+            ? "No intended recipient: the content was posted to a server channel, not sent to a person."
+            : "The account that posted the content is not known.",
+      },
+    ],
+    bankAccountDetails: "",
+    onlinePaymentPlatformDetails: "",
+    creditCardDetails: "",
+    otherAccountsLinkedToUser: "",
+    recoveryAccount: "",
+    fraudulentAccountReason: "",
+    additionalUsernames: "",
+    passportNumber: "",
+    niNumber: "",
+    drivingLicense: "",
+    bio: "",
+    profilePictureAttached: false,
+    biometricDataAttached: false,
+    voiceRecordingsAttached: false,
+    idUploadAttached: false,
+    userProvidedIdentificationRadio: false,
+  });
+
   const reportedPerson = user.discord_user_id
     ? [
         {
@@ -184,15 +239,15 @@ export function ncaPayload(item: QuarantineItem, fields: Fields, config: NcaConf
           dateAccountClosed: "",
           accountClosed: false,
           userNotifiedOfAccountcloser: false,
-          profileUrl: user.profile_url ? [user.profile_url] : [],
-          additionalEmails: [],
-          emails: { email: emails.map((value) => ({ value, verified: false, verificationDate: "" })) },
-          phones: { phone: phones.map((raw) => ({ ...phoneOf(raw), verified: false, verificationDate: "" })) },
+          profileUrl: user.profile_url ? [user.profile_url] : [NOT_HELD],
+          additionalEmails: [{ email: [{ value: "" }] }],
+          emails: { email: emails.length ? emails.map((value) => ({ value, verified: false, verificationDate: "" })) : noEmail },
+          phones: { phone: phones.length ? phones.map((raw) => ({ ...phoneOf(raw), verified: false, verificationDate: "" })) : noPhone },
           addresses: { address: [] },
           billingAddress: { address: addressesOf(billing) },
           recoveryEmail: { email: [{ value: NOT_HELD }] },
-          recoveryPhoneNumber: { phone: [] },
-          sourceInformation: { sourceCapture: [] },
+          recoveryPhoneNumber: { phone: [{ value: "", countryCallingCode: "" }] },
+          sourceInformation: { sourceCapture: noCapture },
           additionalInformation: info([
             user.display_name && `Display name: ${user.display_name}`,
             user.account_created_at && `Discord account created: ${user.account_created_at}`,
@@ -216,7 +271,7 @@ export function ncaPayload(item: QuarantineItem, fields: Fields, config: NcaConf
           userProvidedIdentificationRadio: false,
         },
       ]
-    : [];
+    : [notHeldPerson("sender")];
 
   const hashes = [
     content.sha256 && `SHA-256: ${content.sha256}`,
@@ -230,9 +285,9 @@ export function ncaPayload(item: QuarantineItem, fields: Fields, config: NcaConf
           uploadedDateTime: iso(where.posted_or_uploaded_at) || iso(item.detected_at),
           ipAddress: NOT_HELD,
           potentialMeme: false,
-          links: { link: where.url ? [{ href: where.url, rel: "URL of content" }] : [] },
+          links: { link: [{ href: where.url || NOT_HELD, rel: "URL of content" }] },
           originalFileHashes: { originalFileHash: hashes.map((value) => ({ value })) },
-          sourceInformation: { sourceCapture: [] },
+          sourceInformation: { sourceCapture: noCapture },
           additionalInformation: info([
             user.ip_address && `IP address the file was uploaded from: ${user.ip_address} at ${user.ip_address_time}`,
             content.held,
@@ -276,10 +331,16 @@ export function ncaPayload(item: QuarantineItem, fields: Fields, config: NcaConf
           ? [{ screenName: where.discord_server_name || `Discord server ${where.discord_server_id}`, chatRoomName: where.discord_channel_id ? `Discord channel ${where.discord_channel_id}` : "" }]
           : [],
       },
-      intendedRecipients: { intendedRecipient: [] },
+      intendedRecipients: { intendedRecipient: [notHeldPerson("recipient")] },
       lawEnforcementInformation: {
         caseNumber: item.intake?.route === "police" ? text(item.intake.reference) : "",
         reportedToLawEnforcement: item.intake?.route === "police",
+        investigator: {
+          firstName: "",
+          lastName: "",
+          emails: { email: [{ value: "" }] },
+          phones: { phone: [{ countryCallingCode: "", value: "" }] },
+        },
       },
       reportedPeople: { reportedPerson },
       reportingEsp: {
@@ -291,7 +352,7 @@ export function ncaPayload(item: QuarantineItem, fields: Fields, config: NcaConf
         phones: {
           phone: config.reporter.phone
             ? [phoneOf(config.reporter.phone, config.reporter.phoneCountryCode)]
-            : [],
+            : [{ countryCallingCode: "", value: NOT_HELD }],
         },
         emails: { email: [{ value: config.reporter.email }] },
       },

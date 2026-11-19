@@ -966,3 +966,17 @@ test("Check with the NCA: four invalid probes, never the reported file, logged",
   const log = await quarantine.accessLog("admin:1");
   assert.ok(log.some((e) => e.action === "check_nca" && e.detail.includes("key: 400")));
 });
+
+test("NCA API key: what is saved on the dashboard is what goes in X-API-KEY, byte for byte", async () => {
+  const { quarantine } = storeAt({ t: Date.parse("2026-11-19T10:00:00Z") });
+  const key = "AbC123-xyz_./+=~9876";
+  await quarantine.setNcaApiKey(`  ${key}\n`, new Date("2027-05-19T00:00:00Z"), "admin:1");
+  const stored = await quarantine.ncaApiKey();
+  assert.equal(stored.api_key, key, "only surrounding whitespace is removed");
+  const id = await quarantine.put({ detection: detection({ category: "csam" }), content: Buffer.from("x"), subject: {} });
+  const { fetchImpl, calls } = ncaFetch(() => new Response(JSON.stringify({ referralID: "r", referralFriendlyID: "SR-1" }), { status: 201 }));
+  await quarantine.submitToNca(id, "admin:1", { ...NCA, apiKey: stored.api_key, fetchImpl });
+  const headers = new Headers(calls[0].headers);
+  assert.equal(headers.get("x-api-key"), key);
+  assert.equal(headers.get("orgid"), NCA.orgId);
+});
