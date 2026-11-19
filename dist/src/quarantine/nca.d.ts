@@ -76,11 +76,105 @@ export declare function ncaPayload(item: QuarantineItem, fields: Fields, config:
             }[];
         };
         intendedRecipients: {
-            intendedRecipient: never[];
+            intendedRecipient: {
+                firstName: string;
+                middleName: string;
+                lastName: string;
+                senderStatus: "sender" | "recipient";
+                screenName: string;
+                espUserId: string;
+                ipAddress: string;
+                dateOfBirth: string;
+                billingDateOfBirth: string;
+                billingName: string;
+                dateAccountClosed: string;
+                accountClosed: boolean;
+                userNotifiedOfAccountcloser: boolean;
+                profileUrl: string[];
+                additionalEmails: {
+                    email: {
+                        value: string;
+                    }[];
+                }[];
+                emails: {
+                    email: {
+                        value: string;
+                        verified: boolean;
+                        verificationDate: string;
+                    }[];
+                };
+                phones: {
+                    phone: {
+                        value: string;
+                        countryCallingCode: string;
+                        verified: boolean;
+                        verificationDate: string;
+                    }[];
+                };
+                addresses: {
+                    address: never[];
+                };
+                billingAddress: {
+                    address: never[];
+                };
+                recoveryEmail: {
+                    email: {
+                        value: string;
+                    }[];
+                };
+                recoveryPhoneNumber: {
+                    phone: {
+                        value: string;
+                        countryCallingCode: string;
+                    }[];
+                };
+                sourceInformation: {
+                    sourceCapture: {
+                        captureType: string;
+                        value: string;
+                        eventName: string;
+                        dateTime: string;
+                    }[];
+                };
+                additionalInformation: {
+                    value: string;
+                }[];
+                bankAccountDetails: string;
+                onlinePaymentPlatformDetails: string;
+                creditCardDetails: string;
+                otherAccountsLinkedToUser: string;
+                recoveryAccount: string;
+                fraudulentAccountReason: string;
+                additionalUsernames: string;
+                passportNumber: string;
+                niNumber: string;
+                drivingLicense: string;
+                bio: string;
+                profilePictureAttached: boolean;
+                biometricDataAttached: boolean;
+                voiceRecordingsAttached: boolean;
+                idUploadAttached: boolean;
+                userProvidedIdentificationRadio: boolean;
+            }[];
         };
         lawEnforcementInformation: {
             caseNumber: string;
             reportedToLawEnforcement: boolean;
+            investigator: {
+                firstName: string;
+                lastName: string;
+                emails: {
+                    email: {
+                        value: string;
+                    }[];
+                };
+                phones: {
+                    phone: {
+                        countryCallingCode: string;
+                        value: string;
+                    }[];
+                };
+            };
         };
         reportedPeople: {
             reportedPerson: {
@@ -98,7 +192,11 @@ export declare function ncaPayload(item: QuarantineItem, fields: Fields, config:
                 accountClosed: boolean;
                 userNotifiedOfAccountcloser: boolean;
                 profileUrl: string[];
-                additionalEmails: never[];
+                additionalEmails: {
+                    email: {
+                        value: string;
+                    }[];
+                }[];
                 emails: {
                     email: {
                         value: string;
@@ -108,10 +206,10 @@ export declare function ncaPayload(item: QuarantineItem, fields: Fields, config:
                 };
                 phones: {
                     phone: {
+                        value: string;
+                        countryCallingCode: string;
                         verified: boolean;
                         verificationDate: string;
-                        countryCallingCode: string;
-                        value: string;
                     }[];
                 };
                 addresses: {
@@ -126,10 +224,18 @@ export declare function ncaPayload(item: QuarantineItem, fields: Fields, config:
                     }[];
                 };
                 recoveryPhoneNumber: {
-                    phone: never[];
+                    phone: {
+                        value: string;
+                        countryCallingCode: string;
+                    }[];
                 };
                 sourceInformation: {
-                    sourceCapture: never[];
+                    sourceCapture: {
+                        captureType: string;
+                        value: string;
+                        eventName: string;
+                        dateTime: string;
+                    }[];
                 };
                 additionalInformation: {
                     value: string;
@@ -188,7 +294,12 @@ export declare function ncaPayload(item: QuarantineItem, fields: Fields, config:
                     }[];
                 };
                 sourceInformation: {
-                    sourceCapture: never[];
+                    sourceCapture: {
+                        captureType: string;
+                        value: string;
+                        eventName: string;
+                        dateTime: string;
+                    }[];
                 };
                 additionalInformation: {
                     value: string;
