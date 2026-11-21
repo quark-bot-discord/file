@@ -91,5 +91,15 @@ export function fetchFile(
   decrypted.on("error", (error: Error) =>
     decompressWithFallback.destroy(error),
   );
+  /**
+   * Never an uncaught exception. A stored object that is not valid zstd
+   * (`Unknown frame descriptor`) fails after `primeStream` has seen its first
+   * bytes as often as before, and then nobody is listening: serverlog reads
+   * the stream only when it builds the webhook POST, or not at all for a file
+   * a log leaves off. That reached the bot as `uncaughtException` (34 a day on
+   * main, 21 Nov). The stream is still destroyed with the error, so whoever
+   * reads it later gets it as a rejection, as they would have anyway.
+   */
+  decompressWithFallback.on("error", () => {});
   return decrypted.pipe(decompressWithFallback);
 }
