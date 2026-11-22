@@ -54,6 +54,9 @@ import exifr from "exifr";
 import sharp from "sharp";
 import type { Detection } from "../scan/scanner.js";
 import {
+  endsProperly,
+  mediaNameAndType,
+  NcaLocalError,
   ncaFailureKind,
   ncaPayload,
   submitReferral,
@@ -110,6 +113,8 @@ export interface QuarantineRecord {
     sha256: string;
     type?: string;
     name?: string;
+    /** Set when the file held is shorter than the size Discord declared. */
+    declared_bytes?: number;
   };
   subject: QuarantineSubject;
   /** The user's relevant data from the two weeks before, as the app held it. */
@@ -127,7 +132,21 @@ export interface QuarantineRecord {
     recorded_at: string;
     /** Set when it went through the API: the NCA's own ids. */
     via_api?: { referral_id: string; report_id?: number };
+    /** Sent without the file (e.g. the NCA's service refused its bytes), and why. */
+    file_not_sent?: string;
+    /**
+     * The NCA said the report's media did not all upload (their email "Some
+     * media files have not uploaded"). Cleared by a supplementary report.
+     */
+    media_missing?: { note: string; set_by: string; set_at: string };
   };
+  /** Supplementary reports (SI 2026/268 reg. 6(5)), oldest first. */
+  supplementary?: Array<{
+    reference: string;
+    reported_at: string;
+    reason: string;
+    referral_id?: string;
+  }>;
   /** How it came to Quark when not from the image check. */
   intake?: Intake;
   /** Automatic reporting to the NCA (`autoReportBlocker`). */
@@ -140,7 +159,7 @@ export interface QuarantineRecord {
      * The last failure. `permanent`: not tried again automatically, because
      * the NCA refused it or because it may have been received (`uncertain`).
      */
-    error?: { message: string; permanent: boolean; uncertain?: boolean; at: string };
+    error?: { message: string; permanent: boolean; uncertain?: boolean; local?: boolean; at: string };
     /** Another report already covers this file (same attachment). */
     covered_by?: string;
   };
@@ -194,6 +213,8 @@ export interface QuarantineReference {
   user_id?: string;
   expires_at: string;
   hold?: QuarantineRecord["hold"];
+  /** References of supplementary reports, kept as long as this one. */
+  supplementary?: string[];
 }
 
 export interface AccessEntry {
@@ -215,6 +236,8 @@ export interface AccessEntry {
     | "intake"
     | "submit_nca"
     | "submit_nca_failed"
+    | "submit_nca_supplementary"
+    | "mark_media_missing"
     | "set_auto_report"
     | "delete_unreported"
     | "set_nca_api_key"
@@ -295,6 +318,8 @@ export interface PutInput {
   content: Buffer | null;
   contentType?: string;
   fileName?: string;
+  /** The size Discord declared; recorded when the file is shorter. */
+  declaredBytes?: number;
   subject: QuarantineSubject;
   relevantData?: unknown;
   relevantDataError?: string;
@@ -537,6 +562,9 @@ export class Quarantine {
         sha256: input.content ? createHash("sha256").update(input.content).digest("hex") : "",
         type: input.contentType,
         name: input.fileName,
+        ...(input.content && input.declaredBytes && input.declaredBytes > input.content.length
+          ? { declared_bytes: input.declaredBytes }
+          : {}),
       },
       subject: input.subject,
       relevant_data: input.relevantData,
@@ -811,8 +839,11 @@ export class Quarantine {
     if (record.nca?.paused) return `paused: ${record.nca.paused.reason}`;
     if (record.nca?.error?.uncertain)
       return `the last attempt may have reached the NCA (${record.nca.error.message}). Check "Previously submitted reports" on the portal: if it is there, record its reference; if not, use Report to the NCA now`;
+    if (record.nca?.error?.local) return `not sent: ${record.nca.error.message}`;
     if (record.nca?.error?.permanent) return `the NCA refused it: ${record.nca.error.message}`;
     if (record.intake && !record.intake.auto_report) return "recorded for a decision by hand";
+    if (record.intake && !record.priority)
+      return "set the priority first: a report received by hand may describe a child at risk now (priority 1 or 2)";
     if (!record.intake && record.detection.category !== "csam")
       return `classified ${record.detection.category}: decide by hand whether it is reportable`;
     const attachment = record.subject.attachment_id ?? record.detection.attachment_id;
@@ -837,60 +868,225 @@ export class Quarantine {
    * on the item, and only one that certainly was not processed
    * (`ncaFailureKind` "retry") is tried again automatically.
    */
-  async submitToNca(
+  /**
+   * The quarantined file as it will be sent: read, checked against the
+   * checksum recorded when it was kept, and named and typed from its own
+   * bytes. Throws `NcaLocalError` when it is missing or does not match: the
+   * report is then not sent, rather than sent without its file.
+   */
+  private async mediaFor(record: QuarantineRecord): Promise<{ name: string; type: string; bytes: Buffer; note?: string } | null> {
+    if (!record.content.stored) return null;
+    let bytes: Buffer | null;
+    try {
+      bytes = await this.getSealed(`items/${record.id}/content`);
+    } catch (error) {
+      throw new NcaLocalError(`the stored file could not be opened (${(error as Error).message})`);
+    }
+    if (!bytes) throw new NcaLocalError("the stored file is missing from the quarantine");
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    if (bytes.length !== record.content.bytes || sha256 !== record.content.sha256)
+      throw new NcaLocalError("the stored file does not match the checksum recorded when it was kept");
+    const { name, type } = mediaNameAndType(bytes, record.content.name, record.id);
+    const short = !!record.content.declared_bytes && record.content.declared_bytes > bytes.length;
+    const complete = short ? false : endsProperly(bytes);
+    return {
+      name,
+      type,
+      bytes,
+      ...(complete === false
+        ? {
+            note: short
+              ? `The file appears to be cut short: Quark holds ${bytes.length} bytes of the ${record.content.declared_bytes} Discord declared. It is sent exactly as Quark holds it.`
+              : "The file appears to be cut short (it does not end the way its format requires). It is sent exactly as Quark holds it.",
+          }
+        : {}),
+    };
+  }
+
+  /** The files for one report, the payload adjusted to list them, and lines to add. */
+  private async build(
     id: string,
-    actor: string,
+    record: QuarantineRecord,
     config: NcaConfig,
-    app: AppReportData = {},
-  ): Promise<{ record: QuarantineRecord; result: NcaResult }> {
-    const record = await this.readRecord(id);
-    if (record.report) throw new Error(`Already reported (${record.report.reference})`);
+    app: AppReportData,
+    { withoutFile, extraLines = [], related = [] }: { withoutFile?: string; extraLines?: string[]; related?: string[] } = {},
+  ) {
     const item = await this.readItem(id);
     const fields = await this.fieldsFor(item, app);
-    const payload = ncaPayload(item, fields, config);
+    const payload = ncaPayload(item, fields, config) as Record<string, any>;
     const files: { name: string; type: string; bytes: Buffer }[] = [];
-    if (record.content.stored) {
-      const content = await this.getSealed(`items/${id}/content`);
-      if (content)
-        files.push({
-          name: record.content.name || `quarantine-${id}`,
-          type: record.content.type || "application/octet-stream",
-          bytes: content,
-        });
+    const lines = [...extraLines];
+    if (withoutFile) {
+      lines.push(
+        `The reported file is NOT attached: ${withoutFile}. SHA-256 ${record.content.sha256}${fields["5_how_detected"].pdq_hash_hex ? `, PDQ ${fields["5_how_detected"].pdq_hash_hex}` : ""}, ${record.content.bytes} bytes. Quark keeps it and will send it in a supplementary report, or in any way the NCA asks.`,
+      );
+    } else {
+      const media = await this.mediaFor(record);
+      if (media) {
+        files.push({ name: media.name, type: media.type, bytes: media.bytes });
+        if (media.note) lines.push(media.note);
+      }
     }
     files.push({
       name: "quark-report.json",
       type: "application/json",
       bytes: Buffer.from(JSON.stringify(fields, null, 2)),
     });
-    listFiles(payload as Record<string, unknown>, files, this.now());
+    listFiles(payload, files, this.now());
+    const info = payload.reportedInformation;
+    if (lines.length)
+      info.additionalInformation = [...lines.map((value) => ({ value: value.slice(0, 4000) })), ...info.additionalInformation];
+    if (related.length) {
+      const existing = String(info.incidentSummary.relatedPreviousReferrals || "").split(",").filter(Boolean);
+      info.incidentSummary.relatedPreviousReferrals = [...new Set([...related, ...existing])].join(",");
+    }
+    return { payload, fields, files };
+  }
+
+  private async noteFailure(record: QuarantineRecord, actor: string, action: AccessEntry["action"], error: unknown, at: string) {
+    const kind = ncaFailureKind(error);
+    const message = (error as Error)?.message?.slice(0, 500) ?? String(error);
+    record.nca = record.nca ?? {};
+    record.nca.error = {
+      message,
+      permanent: kind !== "retry",
+      ...(kind === "uncertain" ? { uncertain: true } : {}),
+      ...((error as Error)?.name === "NcaLocalError" ? { local: true } : {}),
+      at,
+    };
+    await this.writeRecord(record);
+    await this.logAccess({ actor, action, id: record.id, detail: message.slice(0, 200) });
+  }
+
+  /**
+   * Report one item to the NCA. `withoutFile`: send an initial report without
+   * the file, giving the reason (SI 2026/268 reg. 6(5)); the file follows in
+   * a supplementary report.
+   */
+  async submitToNca(
+    id: string,
+    actor: string,
+    config: NcaConfig,
+    app: AppReportData = {},
+    { withoutFile }: { withoutFile?: string } = {},
+  ): Promise<{ record: QuarantineRecord; result: NcaResult }> {
+    const record = await this.readRecord(id);
+    if (record.report) throw new Error(`Already reported (${record.report.reference})`);
+    if (withoutFile !== undefined && !withoutFile.trim()) throw new Error("Give the reason the file is not sent");
     const at = this.now().toISOString();
     record.nca = { ...record.nca, attempts: (record.nca?.attempts ?? 0) + 1, last_attempt_at: at };
     let result: NcaResult;
+    let built: Awaited<ReturnType<Quarantine["build"]>>;
     try {
-      result = await submitReferral(config, payload, files);
+      built = await this.build(id, record, config, app, { withoutFile: withoutFile?.trim() });
+      result = await submitReferral(config, built.payload, built.files);
     } catch (error) {
-      const kind = ncaFailureKind(error);
-      const message = (error as Error)?.message?.slice(0, 500) ?? String(error);
-      record.nca.error = { message, permanent: kind !== "retry", ...(kind === "uncertain" ? { uncertain: true } : {}), at };
-      await this.writeRecord(record);
-      await this.logAccess({ actor, action: "submit_nca_failed", id, detail: message.slice(0, 200) });
+      await this.noteFailure(record, actor, "submit_nca_failed", error, at);
       throw error;
     }
+    const { payload, fields, files } = built;
     record.nca.error = undefined;
     await this.writeRecord(record);
     await this.logAccess({ actor, action: "submit_nca", id, detail: result.referralFriendlyID });
-    const reported = await this.recordReport(
+    let reported = await this.recordReport(
       id,
       {
         reference: result.referralFriendlyID,
         reportedAt: at,
-        submitted: { via: "api", payload, fields, files: files.map((f) => ({ name: f.name, bytes: f.bytes.length })) },
+        submitted: { via: "api", payload, fields, files: files.map((f) => ({ name: f.name, type: f.type, bytes: f.bytes.length })) },
         viaApi: { referral_id: result.referralID, report_id: result.reportID },
       },
       actor,
     );
+    if (withoutFile) {
+      reported.report!.file_not_sent = withoutFile.trim();
+      await this.writeRecord(reported);
+      reported = await this.readRecord(id);
+    }
     return { record: reported, result };
+  }
+
+  /**
+   * Record that the NCA said the media of an item's report did not all upload
+   * (their email names the reference). The item then shows a supplementary
+   * report is needed.
+   */
+  async markMediaMissing(id: string, note: string, actor: string): Promise<QuarantineRecord> {
+    const record = await this.readRecord(id);
+    if (!record.report) throw new Error("Not reported yet");
+    record.report.media_missing = { note: note.trim().slice(0, 500) || "NCA email: some media files have not uploaded", set_by: actor, set_at: this.now().toISOString() };
+    await this.writeRecord(record);
+    await this.logAccess({ actor, action: "mark_media_missing", id, detail: record.report.reference });
+    return record;
+  }
+
+  /**
+   * A supplementary report (SI 2026/268 reg. 6(5)): the same report again
+   * with the file, naming the earlier reference, for a report sent without
+   * the file or whose media the NCA did not receive. Keeps the item a year
+   * from this report, and the new reference with the old.
+   */
+  async submitSupplementary(
+    id: string,
+    actor: string,
+    config: NcaConfig,
+    app: AppReportData = {},
+  ): Promise<{ record: QuarantineRecord; result: NcaResult }> {
+    const record = await this.readRecord(id);
+    const report = record.report;
+    if (!report) throw new Error("Not reported yet: send the report first");
+    const why = report.media_missing
+      ? `the NCA said the media of ${report.reference} did not all upload`
+      : report.file_not_sent
+        ? `${report.reference} was sent without the file (${report.file_not_sent})`
+        : null;
+    if (!why) throw new Error("Nothing to supplement: the report was sent with its file and the NCA has not said it is missing");
+    const at = this.now().toISOString();
+    const earlier = [report.reference, ...(record.supplementary ?? []).map((s) => s.reference)];
+    let result: NcaResult;
+    let built: Awaited<ReturnType<Quarantine["build"]>>;
+    try {
+      built = await this.build(id, record, config, app, {
+        extraLines: [`Supplementary report to ${report.reference} (SI 2026/268 regulation 6(5)): ${why}. This report repeats it with the file.`],
+        related: earlier,
+      });
+      if (!built.files.some((f) => f.name !== "quark-report.json"))
+        throw new NcaLocalError("there is no stored file to send");
+      result = await submitReferral(config, built.payload, built.files);
+    } catch (error) {
+      await this.noteFailure(record, actor, "submit_nca_failed", error, at);
+      throw error;
+    }
+    const fresh = await this.readRecord(id);
+    fresh.nca = { ...fresh.nca, error: undefined };
+    fresh.supplementary = [
+      ...(fresh.supplementary ?? []),
+      { reference: result.referralFriendlyID, reported_at: at, reason: why, referral_id: result.referralID },
+    ];
+    if (fresh.report) {
+      delete fresh.report.media_missing;
+      delete fresh.report.file_not_sent;
+    }
+    fresh.expires_at = later(fresh.expires_at, addDays(at, RETENTION_DAYS));
+    await this.writeRecord(fresh);
+    const keptPlain = await this.getSealed(`references/${id}`);
+    if (keptPlain) {
+      const kept = JSON.parse(keptPlain.toString("utf8")) as QuarantineReference;
+      kept.supplementary = [...(kept.supplementary ?? []), result.referralFriendlyID];
+      kept.expires_at = later(kept.expires_at, addDays(at, REFERENCE_RETENTION_DAYS));
+      await this.putSealed(`references/${id}`, Buffer.from(JSON.stringify(kept)));
+    }
+    await this.putSealed(
+      `items/${id}/submitted-${fresh.supplementary.length}`,
+      Buffer.from(JSON.stringify({
+        reference: result.referralFriendlyID,
+        reported_at: at,
+        supplements: report.reference,
+        report: { via: "api", payload: built.payload, fields: built.fields, files: built.files.map((f) => ({ name: f.name, type: f.type, bytes: f.bytes.length })) },
+      })),
+    );
+    await this.logAccess({ actor, action: "submit_nca_supplementary", id, detail: `${result.referralFriendlyID} supplements ${report.reference}` });
+    return { record: fresh, result };
   }
 
   /**

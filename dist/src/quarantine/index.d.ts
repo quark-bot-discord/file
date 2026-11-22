@@ -43,6 +43,8 @@ export interface QuarantineRecord {
         sha256: string;
         type?: string;
         name?: string;
+        /** Set when the file held is shorter than the size Discord declared. */
+        declared_bytes?: number;
     };
     subject: QuarantineSubject;
     /** The user's relevant data from the two weeks before, as the app held it. */
@@ -71,7 +73,25 @@ export interface QuarantineRecord {
             referral_id: string;
             report_id?: number;
         };
+        /** Sent without the file (e.g. the NCA's service refused its bytes), and why. */
+        file_not_sent?: string;
+        /**
+         * The NCA said the report's media did not all upload (their email "Some
+         * media files have not uploaded"). Cleared by a supplementary report.
+         */
+        media_missing?: {
+            note: string;
+            set_by: string;
+            set_at: string;
+        };
     };
+    /** Supplementary reports (SI 2026/268 reg. 6(5)), oldest first. */
+    supplementary?: Array<{
+        reference: string;
+        reported_at: string;
+        reason: string;
+        referral_id?: string;
+    }>;
     /** How it came to Quark when not from the image check. */
     intake?: Intake;
     /** Automatic reporting to the NCA (`autoReportBlocker`). */
@@ -92,6 +112,7 @@ export interface QuarantineRecord {
             message: string;
             permanent: boolean;
             uncertain?: boolean;
+            local?: boolean;
             at: string;
         };
         /** Another report already covers this file (same attachment). */
@@ -134,12 +155,14 @@ export interface QuarantineReference {
     user_id?: string;
     expires_at: string;
     hold?: QuarantineRecord["hold"];
+    /** References of supplementary reports, kept as long as this one. */
+    supplementary?: string[];
 }
 export interface AccessEntry {
     time: string;
     /** `admin:<discord id>`, or `system:<what>` for the apps themselves. */
     actor: string;
-    action: "write" | "list" | "read" | "export_fields" | "export_content" | "record_report" | "set_priority" | "set_hold" | "add_relevant_data" | "expire" | "expire_reference" | "intake" | "submit_nca" | "submit_nca_failed" | "set_auto_report" | "delete_unreported" | "set_nca_api_key" | "check_nca" | "write_register" | "expire_register";
+    action: "write" | "list" | "read" | "export_fields" | "export_content" | "record_report" | "set_priority" | "set_hold" | "add_relevant_data" | "expire" | "expire_reference" | "intake" | "submit_nca" | "submit_nca_failed" | "submit_nca_supplementary" | "mark_media_missing" | "set_auto_report" | "delete_unreported" | "set_nca_api_key" | "check_nca" | "write_register" | "expire_register";
     id?: string;
     detail?: string;
 }
@@ -207,6 +230,8 @@ export interface PutInput {
     content: Buffer | null;
     contentType?: string;
     fileName?: string;
+    /** The size Discord declared; recorded when the file is shorter. */
+    declaredBytes?: number;
     subject: QuarantineSubject;
     relevantData?: unknown;
     relevantDataError?: string;
@@ -374,6 +399,17 @@ export declare class Quarantine {
                 referral_id: string;
                 report_id?: number;
             };
+            /** Sent without the file (e.g. the NCA's service refused its bytes), and why. */
+            file_not_sent?: string;
+            /**
+             * The NCA said the report's media did not all upload (their email "Some
+             * media files have not uploaded"). Cleared by a supplementary report.
+             */
+            media_missing?: {
+                note: string;
+                set_by: string;
+                set_at: string;
+            };
         } | null;
     }>;
     /**
@@ -409,7 +445,40 @@ export declare class Quarantine {
      * on the item, and only one that certainly was not processed
      * (`ncaFailureKind` "retry") is tried again automatically.
      */
-    submitToNca(id: string, actor: string, config: NcaConfig, app?: AppReportData): Promise<{
+    /**
+     * The quarantined file as it will be sent: read, checked against the
+     * checksum recorded when it was kept, and named and typed from its own
+     * bytes. Throws `NcaLocalError` when it is missing or does not match: the
+     * report is then not sent, rather than sent without its file.
+     */
+    private mediaFor;
+    /** The files for one report, the payload adjusted to list them, and lines to add. */
+    private build;
+    private noteFailure;
+    /**
+     * Report one item to the NCA. `withoutFile`: send an initial report without
+     * the file, giving the reason (SI 2026/268 reg. 6(5)); the file follows in
+     * a supplementary report.
+     */
+    submitToNca(id: string, actor: string, config: NcaConfig, app?: AppReportData, { withoutFile }?: {
+        withoutFile?: string;
+    }): Promise<{
+        record: QuarantineRecord;
+        result: NcaResult;
+    }>;
+    /**
+     * Record that the NCA said the media of an item's report did not all upload
+     * (their email names the reference). The item then shows a supplementary
+     * report is needed.
+     */
+    markMediaMissing(id: string, note: string, actor: string): Promise<QuarantineRecord>;
+    /**
+     * A supplementary report (SI 2026/268 reg. 6(5)): the same report again
+     * with the file, naming the earlier reference, for a report sent without
+     * the file or whose media the NCA did not receive. Keeps the item a year
+     * from this report, and the new reference with the old.
+     */
+    submitSupplementary(id: string, actor: string, config: NcaConfig, app?: AppReportData): Promise<{
         record: QuarantineRecord;
         result: NcaResult;
     }>;
@@ -582,6 +651,17 @@ export declare function reportFieldsOf(item: QuarantineRecord | QuarantineItem, 
         via_api?: {
             referral_id: string;
             report_id?: number;
+        };
+        /** Sent without the file (e.g. the NCA's service refused its bytes), and why. */
+        file_not_sent?: string;
+        /**
+         * The NCA said the report's media did not all upload (their email "Some
+         * media files have not uploaded"). Cleared by a supplementary report.
+         */
+        media_missing?: {
+            note: string;
+            set_by: string;
+            set_at: string;
         };
     } | null;
 };
