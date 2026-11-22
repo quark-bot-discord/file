@@ -101,6 +101,8 @@ export interface DetectionEvidence {
     contentType?: string;
     /** Its name, as the uploader gave it. */
     fileName?: string;
+    /** Its size as Discord declared it, to notice a download cut short. */
+    declaredBytes?: number;
     /** Who sent it and from where, as far as the caller knows. */
     subject?: QuarantineSubject;
     /**

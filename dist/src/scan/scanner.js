@@ -341,6 +341,7 @@ export class Scanner {
                     content: evidence.content,
                     contentType: evidence.contentType,
                     fileName: evidence.fileName,
+                    declaredBytes: evidence.declaredBytes,
                     subject: subjectOf(detection, evidence.subject, relevant),
                     relevantData: relevant,
                     relevantDataError: relevantError,

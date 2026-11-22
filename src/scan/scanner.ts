@@ -100,6 +100,8 @@ export interface DetectionEvidence {
   contentType?: string;
   /** Its name, as the uploader gave it. */
   fileName?: string;
+  /** Its size as Discord declared it, to notice a download cut short. */
+  declaredBytes?: number;
   /** Who sent it and from where, as far as the caller knows. */
   subject?: QuarantineSubject;
   /**
@@ -563,6 +565,7 @@ export class Scanner {
           content: evidence.content,
           contentType: evidence.contentType,
           fileName: evidence.fileName,
+          declaredBytes: evidence.declaredBytes,
           subject: subjectOf(detection, evidence.subject, relevant),
           relevantData: relevant,
           relevantDataError: relevantError,

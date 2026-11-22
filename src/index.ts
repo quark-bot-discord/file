@@ -459,7 +459,7 @@ export default class FileStorage {
             hashes: verdict.hashes,
             frames: verdict.frames,
           },
-          { ...evidence, content: scan.file },
+          { ...evidence, content: scan.file, declaredBytes: file_size },
         );
       }
       throw error;
@@ -609,7 +609,7 @@ export default class FileStorage {
           hashes: verdict.hashes,
           frames: verdict.frames,
         },
-        { ...evidence, content: scanned.file },
+        { ...evidence, content: scanned.file, declaredBytes: file_size },
       );
       throw new FileWithheld(verdict.category, "reupload");
     }

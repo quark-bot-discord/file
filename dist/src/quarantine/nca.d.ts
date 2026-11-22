@@ -40,6 +40,8 @@ export declare function priorityIdOf(level: Priority | null | undefined): "1" | 
 /** How the content came to light, in the API's words. */
 export type DetectionMethod = "A user of the platform" | "A third party reporter" | "An automated detection tool" | "An employee moderating the platform";
 export declare function methodOf(item: QuarantineItem): DetectionMethod;
+/** SI 2026/268, Schedule 1, item 5. */
+export declare const DECLARATION = "Declaration (SI 2026/268, Schedule 1, item 5): Quark Bot Limited has provided all the information required by Schedule 1 that is available to it. Items it does not hold are listed above as not available.";
 /** A phone number as the schema's "digits", with its calling code apart if given. */
 export declare function phoneOf(raw: string, defaultCode?: string): {
     countryCallingCode: string;
@@ -343,6 +345,14 @@ export declare class NcaNotSentError extends Error {
     readonly cause?: unknown | undefined;
     constructor(message: string, cause?: unknown | undefined);
 }
+/**
+ * Something on Quark's side stopped the report before anything was sent
+ * (e.g. the stored file is missing or does not match its checksum). Not
+ * retried: a person has to look at the item.
+ */
+export declare class NcaLocalError extends Error {
+    constructor(message: string);
+}
 /** How to treat any error from `submitReferral`. */
 export declare function ncaFailureKind(error: unknown): NcaFailureKind;
 /** The intermediate that issued `host`'s certificate, as PEM, from its CA Issuers address. */
@@ -365,4 +375,34 @@ export declare function submitReferral(config: NcaConfig, payload: unknown, file
     type: string;
     bytes: Buffer;
 }[], encoding?: SubmissionEncoding): Promise<NcaResult>;
+/** What a file actually is, from its first bytes: [MIME type, extension]. */
+export declare function sniffMedia(bytes: Buffer): [string, string] | null;
+/**
+ * The name and type to send a file under: the type from the file itself, not
+ * from what Discord said, and a plain-ASCII name ending in the matching
+ * extension (Discord names can be anything).
+ */
+export declare function mediaNameAndType(bytes: Buffer, originalName: string | undefined, id: string): {
+    name: string;
+    type: string;
+};
+/**
+ * The two weeks of relevant data, also in the report's own text, so it reaches
+ * the NCA even if quark-report.json does not (their system takes media
+ * files; whether it keeps others is not documented). At most
+ * `RELEVANT_TEXT_ENTRIES` entries of 4,000 characters; the rest is in the
+ * attached file, and the text says so.
+ */
+export declare const RELEVANT_TEXT_ENTRIES = 10;
+export declare function relevantDataLines(fields: {
+    "7_relevant_data_two_weeks": unknown;
+}): {
+    value: string;
+}[];
+/**
+ * Whether a file ends the way its format requires: true or false for GIF,
+ * PNG, JPEG and WebP; null when the format is not one of those. A file cut
+ * short in transit fails this.
+ */
+export declare function endsProperly(bytes: Buffer): boolean | null;
 export {};

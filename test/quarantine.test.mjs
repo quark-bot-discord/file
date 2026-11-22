@@ -968,3 +968,119 @@ test("NCA submission: one uploadedFile entry per attached file, named as attache
   assert.match(json.originalFileHashes.originalFileHash[0].value, /^SHA-256: [0-9a-f]{64}$/);
   assert.match(json.uploadedDateTime, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/);
 });
+
+// ------------------------------------------- NCA: the file, and follow-ups
+
+const GIF = Buffer.concat([Buffer.from("GIF89a"), Buffer.alloc(40, 1), Buffer.from([0x3b])]);
+const typedFetch = (answer) => {
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    const form = init.body;
+    calls.push({
+      submission: JSON.parse(form.get("submission")),
+      files: form.getAll("uploadedFiles").map((f) => ({ name: f.name, type: f.type, size: f.size })),
+    });
+    return answer();
+  };
+  return { calls, fetchImpl };
+};
+let refN = 400;
+const okN = () => {
+  refN++;
+  return new Response(JSON.stringify({ success: true, referralID: `id-${refN}`, referralFriendlyID: `SR-CSEAIRP-${refN}` }), { status: 201 });
+};
+const putGif = (quarantine, extra = {}) =>
+  quarantine.put({ detection: detection({ category: "csam" }), content: GIF, contentType: "image/png", fileName: "wéird name ✨.png", subject: {}, ...extra });
+
+test("NCA: the file is named and typed from its own bytes, and the report carries the declaration", async () => {
+  const { quarantine } = storeAt({ t: Date.parse("2026-11-05T10:05:00Z") });
+  const id = await putGif(quarantine, { relevantData: { messages: [{ content: "hello" }] } });
+  const { calls, fetchImpl } = typedFetch(okN);
+  await quarantine.submitToNca(id, "admin:1", { ...NCA, fetchImpl });
+  const [call] = calls;
+  assert.deepEqual(call.files[0], { name: "w_ird_name.gif", type: "image/gif", size: GIF.length });
+  assert.equal(call.submission.reportedInformation.uploadedFiles.uploadedFile[0].originalFilename, "w_ird_name.gif");
+  const lines = call.submission.reportedInformation.additionalInformation.map((l) => l.value);
+  assert.ok(lines.some((l) => /^Declaration \(SI 2026\/268, Schedule 1, item 5\)/.test(l)));
+  assert.ok(lines.some((l) => /^Relevant data, two weeks before \(JSON, part 1 of 1\): .*hello/.test(l)));
+});
+
+test("NCA: a missing or altered file stops the report instead of sending it without the file", async () => {
+  for (const spoil of ["delete", "alter"]) {
+    const { client, quarantine } = storeAt({ t: Date.parse("2026-11-05T10:05:00Z") });
+    const id = await putGif(quarantine);
+    if (spoil === "delete") client.objects.delete(`items/${id}/content`);
+    else client.objects.set(`items/${id}/content`, seal(KEY, `items/${id}/content`, Buffer.concat([GIF, Buffer.from("x")])));
+    const { calls, fetchImpl } = typedFetch(okN);
+    await assert.rejects(quarantine.submitToNca(id, "system:auto-report", { ...NCA, fetchImpl }), { name: "NcaLocalError" });
+    assert.equal(calls.length, 0, spoil);
+    const [rec] = await quarantine.list("admin:1");
+    assert.equal(rec.nca.error.local, true);
+    assert.equal(rec.nca.error.permanent, true);
+    assert.match(quarantine.autoReportBlocker(rec), /^not sent: the stored file (is missing|does not match)/);
+  }
+});
+
+test("NCA: a file shorter than Discord declared, or not ending properly, is sent with a note", async () => {
+  const { quarantine } = storeAt({ t: Date.parse("2026-11-05T10:05:00Z") });
+  const id = await putGif(quarantine, { declaredBytes: GIF.length + 100 });
+  const cut = await putGif(quarantine, { content: GIF.subarray(0, 20) });
+  const { calls, fetchImpl } = typedFetch(okN);
+  await quarantine.submitToNca(id, "admin:1", { ...NCA, fetchImpl });
+  await quarantine.submitToNca(cut, "admin:1", { ...NCA, fetchImpl });
+  const lines = (c) => c.submission.reportedInformation.additionalInformation.map((l) => l.value).join("\n");
+  assert.match(lines(calls[0]), new RegExp(`holds ${GIF.length} bytes of the ${GIF.length + 100} Discord declared`));
+  assert.match(lines(calls[1]), /does not end the way its format requires/);
+  assert.equal(calls[1].files[0].size, 20);
+});
+
+test("NCA: sent without the file, then the file follows in a supplementary report", async () => {
+  const { client, quarantine } = storeAt({ t: Date.parse("2026-11-05T10:05:00Z") });
+  const id = await putGif(quarantine);
+  const { calls, fetchImpl } = typedFetch(okN);
+  await assert.rejects(quarantine.submitToNca(id, "admin:1", { ...NCA, fetchImpl }, {}, { withoutFile: " " }), /reason/);
+  const first = await quarantine.submitToNca(id, "admin:1", { ...NCA, fetchImpl }, {}, { withoutFile: "the NCA's service refused the file (HTTP 403)" });
+  assert.deepEqual(calls[0].files.map((f) => f.name), ["quark-report.json"]);
+  assert.match(calls[0].submission.reportedInformation.additionalInformation[0].value, /^The reported file is NOT attached: the NCA's service refused/);
+  assert.equal(first.record.report.file_not_sent, "the NCA's service refused the file (HTTP 403)");
+  const ref = first.record.report.reference;
+
+  const { record } = await quarantine.submitSupplementary(id, "admin:1", { ...NCA, fetchImpl });
+  assert.deepEqual(calls[1].files.map((f) => f.name), ["w_ird_name.gif", "quark-report.json"]);
+  assert.ok(calls[1].submission.reportedInformation.incidentSummary.relatedPreviousReferrals.split(",").includes(ref));
+  assert.match(calls[1].submission.reportedInformation.additionalInformation[0].value, new RegExp(`^Supplementary report to ${ref}`));
+  assert.equal(record.supplementary.length, 1);
+  assert.equal(record.report.file_not_sent, undefined);
+  assert.ok(client.objects.has(`items/${id}/submitted-1`));
+  assert.ok(accessActions(client).includes("submit_nca_supplementary"));
+  await assert.rejects(quarantine.submitSupplementary(id, "admin:1", { ...NCA, fetchImpl }), /Nothing to supplement/);
+});
+
+test("NCA: media the NCA says did not upload is marked, then sent again", async () => {
+  const { quarantine } = storeAt({ t: Date.parse("2026-11-05T10:05:00Z") });
+  const id = await putGif(quarantine);
+  const { calls, fetchImpl } = typedFetch(okN);
+  await assert.rejects(quarantine.markMediaMissing(id, "x", "admin:1"), /Not reported/);
+  const { record: sent } = await quarantine.submitToNca(id, "admin:1", { ...NCA, fetchImpl });
+  const marked = await quarantine.markMediaMissing(id, "NCA email 22 Nov", "admin:1");
+  assert.equal(marked.report.media_missing.note, "NCA email 22 Nov");
+  const { record } = await quarantine.submitSupplementary(id, "admin:1", { ...NCA, fetchImpl });
+  assert.match(calls[1].submission.reportedInformation.additionalInformation[0].value, new RegExp(`the NCA said the media of ${sent.report.reference} did not all upload`));
+  assert.equal(record.report.media_missing, undefined);
+  assert.equal(record.supplementary[0].reference, `SR-CSEAIRP-${refN}`);
+});
+
+test("NCA: a report recorded by hand is not sent automatically until its priority is set", async () => {
+  const { quarantine } = storeAt({ t: Date.parse("2026-11-05T10:05:00Z") });
+  const id = await quarantine.put({
+    detection: detection({ category: "csam" }),
+    content: null,
+    subject: {},
+    intake: { route: "email", recorded_by: "admin:1", recorded_at: "2026-11-05T10:00:00Z", auto_report: true },
+  });
+  let [rec] = await quarantine.list("admin:1");
+  assert.match(quarantine.autoReportBlocker(rec), /set the priority first/);
+  await quarantine.setPriority(id, "other", "admin:1");
+  [rec] = await quarantine.list("admin:1");
+  assert.equal(quarantine.autoReportBlocker(rec), null);
+});

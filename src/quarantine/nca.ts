@@ -92,6 +92,9 @@ export function methodOf(item: QuarantineItem): DetectionMethod {
 }
 
 const NOT_HELD = "Data not held";
+/** SI 2026/268, Schedule 1, item 5. */
+export const DECLARATION =
+  "Declaration (SI 2026/268, Schedule 1, item 5): Quark Bot Limited has provided all the information required by Schedule 1 that is available to it. Items it does not hold are listed above as not available.";
 const text = (v: unknown) => (typeof v === "string" ? v : "");
 /**
  * A date-time as in every example in the NCA's schema: `yyyy-MM-ddTHH:mm:ss`,
@@ -325,7 +328,8 @@ export function ncaPayload(item: QuarantineItem, fields: Fields, config: NcaConf
         "All dates and times in this report are UTC.",
         ...fields.not_available.map((n) => `Not available: ${n}`),
         "Everything else Quark holds, including the user's relevant data from the two weeks before, is attached as quark-report.json.",
-      ]),
+        DECLARATION,
+      ]).concat(relevantDataLines(fields)),
       incidentDetails: {
         chatIncident: where.discord_server_id
           ? [{ screenName: where.discord_server_name || `Discord server ${where.discord_server_id}`, chatRoomName: where.discord_channel_id ? `Discord channel ${where.discord_channel_id}` : "" }]
@@ -417,6 +421,18 @@ export class NcaNotSentError extends Error {
   }
 }
 
+/**
+ * Something on Quark's side stopped the report before anything was sent
+ * (e.g. the stored file is missing or does not match its checksum). Not
+ * retried: a person has to look at the item.
+ */
+export class NcaLocalError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NcaLocalError";
+  }
+}
+
 /** Network errors that mean the request never reached the NCA. */
 const NOT_SENT_CODES = new Set(["ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH", "UND_ERR_CONNECT_TIMEOUT"]);
 
@@ -424,6 +440,7 @@ const NOT_SENT_CODES = new Set(["ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED", "EHOST
 export function ncaFailureKind(error: unknown): NcaFailureKind {
   if ((error as Error)?.name === "NcaError") return (error as NcaError).kind;
   if ((error as Error)?.name === "NcaNotSentError") return "retry";
+  if ((error as Error)?.name === "NcaLocalError") return "refused";
   const code = (error as { cause?: { code?: string }; code?: string })?.cause?.code ?? (error as { code?: string })?.code ?? "";
   if (NOT_SENT_CODES.has(code) || /^(CERT_|UNABLE_TO_|ERR_TLS_|DEPTH_ZERO|SELF_SIGNED)/.test(code)) return "retry";
   return "uncertain";
@@ -590,3 +607,81 @@ export async function submitReferral(
   };
 }
 
+/** What a file actually is, from its first bytes: [MIME type, extension]. */
+export function sniffMedia(bytes: Buffer): [string, string] | null {
+  const h = bytes.subarray(0, 12).toString("hex");
+  if (h.startsWith("47494638")) return ["image/gif", "gif"];
+  if (h.startsWith("89504e470d0a1a0a")) return ["image/png", "png"];
+  if (h.startsWith("ffd8ff")) return ["image/jpeg", "jpg"];
+  if (h.startsWith("52494646") && h.slice(16, 24) === "57454250") return ["image/webp", "webp"];
+  if (h.startsWith("424d")) return ["image/bmp", "bmp"];
+  if (h.startsWith("49492a00") || h.startsWith("4d4d002a")) return ["image/tiff", "tif"];
+  if (h.slice(8, 16) === "66747970") {
+    const brand = bytes.subarray(8, 12).toString("latin1");
+    if (/^(avif|avis)$/.test(brand)) return ["image/avif", "avif"];
+    if (/^(heic|heix|mif1|msf1)$/.test(brand)) return ["image/heic", "heic"];
+    if (brand === "qt  ") return ["video/quicktime", "mov"];
+    return ["video/mp4", "mp4"];
+  }
+  if (h.startsWith("1a45dfa3")) return ["video/webm", "webm"];
+  return null;
+}
+
+/**
+ * The name and type to send a file under: the type from the file itself, not
+ * from what Discord said, and a plain-ASCII name ending in the matching
+ * extension (Discord names can be anything).
+ */
+export function mediaNameAndType(bytes: Buffer, originalName: string | undefined, id: string): { name: string; type: string } {
+  const sniffed = sniffMedia(bytes);
+  const raw = (originalName ?? "").replace(/\.[A-Za-z0-9]{1,5}$/, "");
+  const base = raw.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^[._]+|[._]+$/g, "").slice(0, 80) || `quarantine-${id}`;
+  if (!sniffed) {
+    const ext = /\.([A-Za-z0-9]{1,5})$/.exec(originalName ?? "")?.[1]?.toLowerCase();
+    return { name: ext ? `${base}.${ext}` : base, type: "application/octet-stream" };
+  }
+  return { name: `${base}.${sniffed[1]}`, type: sniffed[0] };
+}
+
+/**
+ * The two weeks of relevant data, also in the report's own text, so it reaches
+ * the NCA even if quark-report.json does not (their system takes media
+ * files; whether it keeps others is not documented). At most
+ * `RELEVANT_TEXT_ENTRIES` entries of 4,000 characters; the rest is in the
+ * attached file, and the text says so.
+ */
+export const RELEVANT_TEXT_ENTRIES = 10;
+export function relevantDataLines(fields: { "7_relevant_data_two_weeks": unknown }): { value: string }[] {
+  const data = fields["7_relevant_data_two_weeks"] as { at_match?: unknown; added_since?: Record<string, unknown> } | undefined;
+  const hasAny = data && (data.at_match != null || Object.keys(data.added_since ?? {}).length > 0);
+  if (!hasAny) return [];
+  const text = JSON.stringify(data);
+  const size = 3900;
+  const total = Math.ceil(text.length / size);
+  const shown = Math.min(total, RELEVANT_TEXT_ENTRIES);
+  const out: { value: string }[] = [];
+  for (let i = 0; i < shown; i++)
+    out.push({ value: `Relevant data, two weeks before (JSON, part ${i + 1} of ${total}): ${text.slice(i * size, (i + 1) * size)}` });
+  if (total > shown)
+    out.push({ value: `Relevant data continues in quark-report.json (parts ${shown + 1} to ${total} not repeated here).` });
+  return out;
+}
+
+/**
+ * Whether a file ends the way its format requires: true or false for GIF,
+ * PNG, JPEG and WebP; null when the format is not one of those. A file cut
+ * short in transit fails this.
+ */
+export function endsProperly(bytes: Buffer): boolean | null {
+  const kind = sniffMedia(bytes)?.[1];
+  if (kind === "gif") return bytes.at(-1) === 0x3b;
+  if (kind === "png") return bytes.length >= 12 && bytes.subarray(-8, -4).toString("latin1") === "IEND";
+  if (kind === "jpg") {
+    // Some encoders add padding after the end marker.
+    const tail = bytes.subarray(Math.max(0, bytes.length - 64));
+    for (let i = tail.length - 2; i >= 0; i--) if (tail[i] === 0xff && tail[i + 1] === 0xd9) return true;
+    return false;
+  }
+  if (kind === "webp") return bytes.length >= 12 && bytes.readUInt32LE(4) + 8 <= bytes.length;
+  return null;
+}
