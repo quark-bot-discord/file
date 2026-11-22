@@ -1084,3 +1084,49 @@ test("NCA: a report recorded by hand is not sent automatically until its priorit
   [rec] = await quarantine.list("admin:1");
   assert.equal(quarantine.autoReportBlocker(rec), null);
 });
+
+// ------------------------------- NCA: the same uploader's other matches
+
+test("NCA: a csam report carries the same uploader's harmful-abusive matches, which are then kept", async () => {
+  const { quarantine } = storeAt({ t: Date.parse("2026-11-05T10:05:00Z") });
+  const by = (user, category, extra = {}) =>
+    quarantine.put({ detection: detection({ category, user_id: user }), content: GIF, contentType: "image/gif", fileName: "x.gif", subject: { user_id: user, guild_id: "1", channel_id: "2", message_id: "3" }, ...extra });
+  const csam = await by("100000000000000001", "csam");
+  const mine = await by("100000000000000001", "harmful-abusive-material");
+  const theirs = await by("100000000000000002", "harmful-abusive-material");
+  const { calls, fetchImpl } = typedFetch(okN);
+  const { record } = await quarantine.submitToNca(csam, "system:auto-report", { ...NCA, fetchImpl });
+  const [call] = calls;
+  assert.deepEqual(call.files.map((f) => f.name), ["x.gif", "quark-report.json", "other-match-1-x.gif"]);
+  const entries = call.submission.reportedInformation.uploadedFile ?? call.submission.reportedInformation.uploadedFiles.uploadedFile;
+  assert.equal(entries.length, 3);
+  assert.equal(entries[2].originalFilename, "other-match-1-x.gif");
+  assert.match(entries[2].additionalInformation[0].value, /reg\. 6\(4\)\(d\).*harmful-abusive-material.*Not assessed under UK law and not viewed by Quark/);
+  const lines = call.submission.reportedInformation.additionalInformation.map((l) => l.value).join("\n");
+  assert.match(lines, /1 further match from the same uploader/);
+  const all = await quarantine.list("admin:1");
+  const m = all.find((r) => r.id === mine);
+  assert.equal(m.included_in.reference, record.report.reference);
+  assert.match(quarantine.autoReportBlocker(m), /sent to the NCA with/);
+  assert.equal(all.find((r) => r.id === theirs).included_in, undefined);
+  await assert.rejects(quarantine.deleteUnreported(mine, "x", "admin:1"), /kept for one year/);
+});
+
+test("NCA: a later match from the same uploader goes in a supplementary report, without repeating the file", async () => {
+  const { quarantine } = storeAt({ t: Date.parse("2026-11-05T10:05:00Z") });
+  const user = "100000000000000001";
+  const csam = await quarantine.put({ detection: detection({ category: "csam", user_id: user }), content: GIF, fileName: "a.gif", subject: { user_id: user } });
+  const { calls, fetchImpl } = typedFetch(okN);
+  const { record } = await quarantine.submitToNca(csam, "system:auto-report", { ...NCA, fetchImpl });
+  await assert.rejects(quarantine.submitSupplementary(csam, "system:auto-report", { ...NCA, fetchImpl }), /no further matches/);
+  const later = await quarantine.put({ detection: detection({ category: "harmful-abusive-material", user_id: user }), content: GIF, fileName: "b.gif", subject: { user_id: user } });
+  const [summary] = (await quarantine.list("admin:1")).filter((r) => r.id === csam);
+  assert.equal(quarantine.relatedMatches(summary, await quarantine.list("admin:1")).length, 1);
+  await quarantine.submitSupplementary(csam, "system:auto-report", { ...NCA, fetchImpl });
+  assert.deepEqual(calls[1].files.map((f) => f.name), ["quark-report.json", "other-match-1-b.gif"]);
+  const lines = calls[1].submission.reportedInformation.additionalInformation.map((l) => l.value).join("\n");
+  assert.match(lines, new RegExp(`Supplementary report to ${record.report.reference}.*further matches from the same uploader`));
+  assert.match(lines, new RegExp(`The reported file was sent with ${record.report.reference}`));
+  const [l] = (await quarantine.list("admin:1")).filter((r) => r.id === later);
+  assert.ok(l.included_in);
+});
