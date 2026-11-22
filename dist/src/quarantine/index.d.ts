@@ -85,6 +85,16 @@ export interface QuarantineRecord {
             set_at: string;
         };
     };
+    /**
+     * Sent to the NCA as other relevant information (reg. 6(4)(d)) with the
+     * report on another item from the same uploader: a `harmful-abusive-material`
+     * match attached to a `csam` report. Kept a year from that report.
+     */
+    included_in?: {
+        item: string;
+        reference: string;
+        at: string;
+    };
     /** Supplementary reports (SI 2026/268 reg. 6(5)), oldest first. */
     supplementary?: Array<{
         reference: string;
@@ -162,7 +172,7 @@ export interface AccessEntry {
     time: string;
     /** `admin:<discord id>`, or `system:<what>` for the apps themselves. */
     actor: string;
-    action: "write" | "list" | "read" | "export_fields" | "export_content" | "record_report" | "set_priority" | "set_hold" | "add_relevant_data" | "expire" | "expire_reference" | "intake" | "submit_nca" | "submit_nca_failed" | "submit_nca_supplementary" | "mark_media_missing" | "set_auto_report" | "delete_unreported" | "set_nca_api_key" | "check_nca" | "write_register" | "expire_register";
+    action: "write" | "list" | "read" | "export_fields" | "export_content" | "record_report" | "set_priority" | "set_hold" | "add_relevant_data" | "expire" | "expire_reference" | "intake" | "submit_nca" | "submit_nca_failed" | "submit_nca_supplementary" | "mark_media_missing" | "include_in_report" | "set_auto_report" | "delete_unreported" | "set_nca_api_key" | "check_nca" | "write_register" | "expire_register";
     id?: string;
     detail?: string;
 }
@@ -452,8 +462,19 @@ export declare class Quarantine {
      * report is then not sent, rather than sent without its file.
      */
     private mediaFor;
+    /** Every record, without logging a list (internal use). */
+    private allRecords;
+    /**
+     * The same uploader's other matches to attach to a `csam` report as other
+     * relevant information (reg. 6(4)(d)): unreported `harmful-abusive-material`
+     * matches with a stored file, not already sent with a report. Only for a
+     * match found by the image check (not a report recorded by hand).
+     */
+    relatedMatches(record: QuarantineSummary, all: QuarantineSummary[]): QuarantineSummary[];
     /** The files for one report, the payload adjusted to list them, and lines to add. */
     private build;
+    /** Mark matches as sent with a report: kept a year from it, never cleared. */
+    private markIncluded;
     private noteFailure;
     /**
      * Report one item to the NCA. `withoutFile`: send an initial report without

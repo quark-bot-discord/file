@@ -140,6 +140,12 @@ export interface QuarantineRecord {
      */
     media_missing?: { note: string; set_by: string; set_at: string };
   };
+  /**
+   * Sent to the NCA as other relevant information (reg. 6(4)(d)) with the
+   * report on another item from the same uploader: a `harmful-abusive-material`
+   * match attached to a `csam` report. Kept a year from that report.
+   */
+  included_in?: { item: string; reference: string; at: string };
   /** Supplementary reports (SI 2026/268 reg. 6(5)), oldest first. */
   supplementary?: Array<{
     reference: string;
@@ -238,6 +244,7 @@ export interface AccessEntry {
     | "submit_nca_failed"
     | "submit_nca_supplementary"
     | "mark_media_missing"
+    | "include_in_report"
     | "set_auto_report"
     | "delete_unreported"
     | "set_nca_api_key"
@@ -731,6 +738,8 @@ export class Quarantine {
       throw new Error("Reported items are kept for one year from the report and cannot be deleted");
     if (record.hold)
       throw new Error("This item is on legal hold. Lift the hold first");
+    if (record.included_in)
+      throw new Error(`Sent to the NCA with ${record.included_in.reference}: kept for one year from that report`);
     const clean = reason.trim();
     if (!clean || clean.length > 500)
       throw new Error("The reason must be 1 to 500 characters");
@@ -836,6 +845,8 @@ export class Quarantine {
    */
   autoReportBlocker(record: QuarantineSummary, others: QuarantineSummary[] = []): string | null {
     if (record.report) return "already reported";
+    if (record.included_in)
+      return `sent to the NCA with ${record.included_in.reference} as other relevant information (same uploader)`;
     if (record.nca?.paused) return `paused: ${record.nca.paused.reason}`;
     if (record.nca?.error?.uncertain)
       return `the last attempt may have reached the NCA (${record.nca.error.message}). Check "Previously submitted reports" on the portal: if it is there, record its reference; if not, use Report to the NCA now`;
@@ -903,20 +914,73 @@ export class Quarantine {
     };
   }
 
+  /** Every record, without logging a list (internal use). */
+  private async allRecords(): Promise<QuarantineRecord[]> {
+    const out: QuarantineRecord[] = [];
+    for (const id of await this.recordIds()) {
+      try {
+        out.push(await this.readRecord(id));
+      } catch (error) {
+        if (!(error instanceof QuarantineNotFound)) throw error;
+      }
+    }
+    return out;
+  }
+
+  /**
+   * The same uploader's other matches to attach to a `csam` report as other
+   * relevant information (reg. 6(4)(d)): unreported `harmful-abusive-material`
+   * matches with a stored file, not already sent with a report. Only for a
+   * match found by the image check (not a report recorded by hand).
+   */
+  relatedMatches(record: QuarantineSummary, all: QuarantineSummary[]): QuarantineSummary[] {
+    if (record.intake || record.detection.category !== "csam") return [];
+    const who = record.subject.user_id ?? record.detection.user_id;
+    if (!who) return [];
+    return all
+      .filter(
+        (o) =>
+          o.id !== record.id &&
+          !o.intake &&
+          !o.report &&
+          !o.included_in &&
+          o.content.stored &&
+          o.detection.category === "harmful-abusive-material" &&
+          (o.subject.user_id ?? o.detection.user_id) === who,
+      )
+      .sort((a, b) => (a.detected_at < b.detected_at ? -1 : 1));
+  }
+
   /** The files for one report, the payload adjusted to list them, and lines to add. */
   private async build(
     id: string,
     record: QuarantineRecord,
     config: NcaConfig,
     app: AppReportData,
-    { withoutFile, extraLines = [], related = [] }: { withoutFile?: string; extraLines?: string[]; related?: string[] } = {},
+    {
+      withoutFile,
+      mainSentWith,
+      extraLines = [],
+      related = [],
+      others = [],
+    }: {
+      withoutFile?: string;
+      /** The main file went with this earlier report: not sent again. */
+      mainSentWith?: string;
+      extraLines?: string[];
+      related?: string[];
+      /** The same uploader's other matches, attached after the main file. */
+      others?: QuarantineRecord[];
+    } = {},
   ) {
     const item = await this.readItem(id);
     const fields = await this.fieldsFor(item, app);
     const payload = ncaPayload(item, fields, config) as Record<string, any>;
     const files: { name: string; type: string; bytes: Buffer }[] = [];
     const lines = [...extraLines];
-    if (withoutFile) {
+    if (mainSentWith) {
+      lines.push(`The reported file was sent with ${mainSentWith} and is not repeated here.`);
+    } else if (withoutFile) {
       lines.push(
         `The reported file is NOT attached: ${withoutFile}. SHA-256 ${record.content.sha256}${fields["5_how_detected"].pdq_hash_hex ? `, PDQ ${fields["5_how_detected"].pdq_hash_hex}` : ""}, ${record.content.bytes} bytes. Quark keeps it and will send it in a supplementary report, or in any way the NCA asks.`,
       );
@@ -927,12 +991,53 @@ export class Quarantine {
         if (media.note) lines.push(media.note);
       }
     }
-    files.push({
+    const included: QuarantineRecord[] = [];
+    const otherEntries: Record<string, unknown>[] = [];
+    for (const other of others) {
+      let media: Awaited<ReturnType<Quarantine["mediaFor"]>>;
+      try {
+        media = await this.mediaFor(other);
+      } catch (error) {
+        lines.push(`A further match from the same uploader (quarantine ${other.id}) could not be attached: ${(error as Error).message}.`);
+        continue;
+      }
+      if (!media) continue;
+      const name = `other-match-${included.length + 1}-${media.name}`;
+      files.push({ name, type: media.type, bytes: media.bytes });
+      included.push(other);
+      otherEntries.push({
+        originalFilename: name,
+        uploadedDateTime: other.detected_at.slice(0, 19),
+        ipAddress: "Data not held",
+        potentialMeme: false,
+        links: { link: [{ href: other.subject.guild_id && other.subject.channel_id && other.subject.message_id ? `https://discord.com/channels/${other.subject.guild_id}/${other.subject.channel_id}/${other.subject.message_id}` : "Data not held", rel: "URL of content" }] },
+        originalFileHashes: { originalFileHash: [{ value: `SHA-256: ${other.content.sha256}` }, ...(other.detection.pdq ? [{ value: `PDQ: ${other.detection.pdq}` }] : [])] },
+        sourceInformation: { sourceCapture: [{ captureType: "IP address", value: "", eventName: "LOGIN", dateTime: "" }] },
+        additionalInformation: [
+          {
+            value: `Other relevant information (SI 2026/268 reg. 6(4)(d)): a further match from the same uploader, found ${other.detected_at.slice(0, 19)} UTC (quarantine ${other.id}). Arachnid Shield classified it harmful-abusive-material: in C3P's assessment it does not appear to meet a criminal threshold across multiple jurisdictions. Not assessed under UK law and not viewed by Quark.${media.note ? ` ${media.note}` : ""}`,
+          },
+        ],
+      });
+      if (media.note) lines.push(`${name}: ${media.note}`);
+    }
+    if (included.length)
+      lines.push(
+        `Attached as other relevant information (reg. 6(4)(d)): ${included.length} further match${included.length === 1 ? "" : "es"} from the same uploader that Arachnid Shield classified harmful-abusive-material (below C3P's multi-jurisdiction criminal threshold; not assessed under UK law; not viewed by Quark). Each is described in its uploadedFile entry.`,
+      );
+    const reportFile = {
       name: "quark-report.json",
       type: "application/json",
       bytes: Buffer.from(JSON.stringify(fields, null, 2)),
-    });
-    listFiles(payload, files, this.now());
+    };
+    // listFiles pairs the first entries with the main file and the JSON; the
+    // other matches' entries are added after it.
+    const mainFiles = files.filter((f) => !f.name.startsWith("other-match-"));
+    const otherFiles = files.filter((f) => f.name.startsWith("other-match-"));
+    files.length = 0;
+    files.push(...mainFiles, reportFile, ...otherFiles);
+    listFiles(payload, [...mainFiles, reportFile], this.now());
+    payload.reportedInformation.uploadedFiles.uploadedFile.push(...otherEntries);
     const info = payload.reportedInformation;
     if (lines.length)
       info.additionalInformation = [...lines.map((value) => ({ value: value.slice(0, 4000) })), ...info.additionalInformation];
@@ -940,7 +1045,18 @@ export class Quarantine {
       const existing = String(info.incidentSummary.relatedPreviousReferrals || "").split(",").filter(Boolean);
       info.incidentSummary.relatedPreviousReferrals = [...new Set([...related, ...existing])].join(",");
     }
-    return { payload, fields, files };
+    return { payload, fields, files, included };
+  }
+
+  /** Mark matches as sent with a report: kept a year from it, never cleared. */
+  private async markIncluded(included: QuarantineRecord[], item: string, reference: string, at: string, actor: string) {
+    for (const other of included) {
+      const record = await this.readRecord(other.id);
+      record.included_in = { item, reference, at };
+      record.expires_at = later(record.expires_at, addDays(at, RETENTION_DAYS));
+      await this.writeRecord(record);
+      await this.logAccess({ actor, action: "include_in_report", id: other.id, detail: `${reference} (${item})` });
+    }
   }
 
   private async noteFailure(record: QuarantineRecord, actor: string, action: AccessEntry["action"], error: unknown, at: string) {
@@ -978,7 +1094,8 @@ export class Quarantine {
     let result: NcaResult;
     let built: Awaited<ReturnType<Quarantine["build"]>>;
     try {
-      built = await this.build(id, record, config, app, { withoutFile: withoutFile?.trim() });
+      const others = this.relatedMatches(record, await this.allRecords()) as QuarantineRecord[];
+      built = await this.build(id, record, config, app, { withoutFile: withoutFile?.trim(), others });
       result = await submitReferral(config, built.payload, built.files);
     } catch (error) {
       await this.noteFailure(record, actor, "submit_nca_failed", error, at);
@@ -998,6 +1115,7 @@ export class Quarantine {
       },
       actor,
     );
+    await this.markIncluded(built.included, id, result.referralFriendlyID, at, actor);
     if (withoutFile) {
       reported.report!.file_not_sent = withoutFile.trim();
       await this.writeRecord(reported);
@@ -1035,20 +1153,28 @@ export class Quarantine {
     const record = await this.readRecord(id);
     const report = record.report;
     if (!report) throw new Error("Not reported yet: send the report first");
+    const others = this.relatedMatches(record, await this.allRecords()) as QuarantineRecord[];
+    const resend = !!(report.media_missing || report.file_not_sent);
     const why = report.media_missing
       ? `the NCA said the media of ${report.reference} did not all upload`
       : report.file_not_sent
         ? `${report.reference} was sent without the file (${report.file_not_sent})`
-        : null;
-    if (!why) throw new Error("Nothing to supplement: the report was sent with its file and the NCA has not said it is missing");
+        : others.length
+          ? `further matches from the same uploader, found since ${report.reference}`
+          : null;
+    if (!why) throw new Error("Nothing to supplement: the report was sent with its file, the NCA has not said it is missing, and there are no further matches from the uploader");
     const at = this.now().toISOString();
     const earlier = [report.reference, ...(record.supplementary ?? []).map((s) => s.reference)];
     let result: NcaResult;
     let built: Awaited<ReturnType<Quarantine["build"]>>;
     try {
       built = await this.build(id, record, config, app, {
-        extraLines: [`Supplementary report to ${report.reference} (SI 2026/268 regulation 6(5)): ${why}. This report repeats it with the file.`],
+        extraLines: [
+          `Supplementary report to ${report.reference} (SI 2026/268 regulation 6(5)): ${why}.${resend ? " This report repeats it with the file." : ""}`,
+        ],
         related: earlier,
+        others,
+        ...(resend ? {} : { mainSentWith: report.reference }),
       });
       if (!built.files.some((f) => f.name !== "quark-report.json"))
         throw new NcaLocalError("there is no stored file to send");
@@ -1085,6 +1211,7 @@ export class Quarantine {
         report: { via: "api", payload: built.payload, fields: built.fields, files: built.files.map((f) => ({ name: f.name, type: f.type, bytes: f.bytes.length })) },
       })),
     );
+    await this.markIncluded(built.included, id, result.referralFriendlyID, at, actor);
     await this.logAccess({ actor, action: "submit_nca_supplementary", id, detail: `${result.referralFriendlyID} supplements ${report.reference}` });
     return { record: fresh, result };
   }
