@@ -31,6 +31,12 @@ export interface NcaConfig {
         phoneCountryCode: string;
     };
     fetchImpl?: typeof fetch;
+    /**
+     * Attach a readable chat document (chat-log-<id>.txt) to every report.
+     * Off until the NCA confirms the file type (NCA_CHAT_DOCUMENT=txt); it can
+     * always be sent on its own in a supplementary report.
+     */
+    chatDocument?: "txt";
     /** Tests only: the roots trusted when the server's chain has to be completed. */
     rootCertificates?: readonly string[];
 }
@@ -405,4 +411,20 @@ export declare function relevantDataLines(fields: {
  * short in transit fails this.
  */
 export declare function endsProperly(bytes: Buffer): boolean | null;
+/** "Posted as an ordinary message by the account", from the bot's snapshot. */
+export declare function postedAsLine(fields: {
+    "7_relevant_data_two_weeks": unknown;
+}): string | null;
+/**
+ * A readable chat document for one report: the posting message, the user's
+ * own messages and others' messages to them from the two weeks before (as
+ * captured at the match), and what the website logged. Text only: message
+ * records hold no links, and files are named, never included.
+ */
+export declare function chatDocument(item: {
+    id: string;
+    report?: {
+        reference?: string;
+    } | null;
+}, fields: Record<string, any>): string;
 export {};
