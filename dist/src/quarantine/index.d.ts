@@ -163,6 +163,8 @@ export interface QuarantineReference {
     pdq: string;
     /** Who it was about, so a later report can say it relates to this one. */
     user_id?: string;
+    /** Where, so a later report from the same server can name this one. */
+    guild_id?: string;
     expires_at: string;
     hold?: QuarantineRecord["hold"];
     /** References of supplementary reports, kept as long as this one. */
@@ -429,8 +431,9 @@ export declare class Quarantine {
     private fieldsFor;
     /**
      * Reports already sent that this one relates to (Schedule 1: "whether it
-     * relates to a previous report"): the same Discord user, or the same image
-     * by its PDQ hash. Read from the kept references, which outlive their
+     * relates to a previous report"): the same Discord user, the same image
+     * by its PDQ hash, or the same server within two weeks either side (one
+     * incident in one server, reported per file). Read from the kept references, which outlive their
      * items. References made before `user_id` was kept match by image only,
      * unless their item is still here to say who it was about.
      */
@@ -499,7 +502,9 @@ export declare class Quarantine {
      * the file or whose media the NCA did not receive. Keeps the item a year
      * from this report, and the new reference with the old.
      */
-    submitSupplementary(id: string, actor: string, config: NcaConfig, app?: AppReportData): Promise<{
+    submitSupplementary(id: string, actor: string, config: NcaConfig, app?: AppReportData, { chatDocument: chatOnly }?: {
+        chatDocument?: boolean;
+    }): Promise<{
         record: QuarantineRecord;
         result: NcaResult;
     }>;
@@ -567,7 +572,7 @@ export interface PreviousReport {
     reference: string;
     reported_at: string;
     quarantine_id: string;
-    relates_by: "same user" | "same image" | "same user and image";
+    relates_by: string;
 }
 export type ExifResult = {
     tags: Record<string, unknown> | null;

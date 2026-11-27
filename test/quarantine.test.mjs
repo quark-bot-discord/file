@@ -371,21 +371,21 @@ test("a report says it relates to an earlier one about the same user or the same
   const clock = { t: Date.parse("2026-11-05T10:00:00Z") };
   const { quarantine } = storeAt(clock);
   const first = await quarantine.put({
-    detection: detection({ pdq: Buffer.alloc(32, 7).toString("base64") }),
+    detection: detection({ pdq: Buffer.alloc(32, 7).toString("base64"), guild_id: "500000000000000001" }),
     content: Buffer.from("a"),
     subject: { user_id: "254307281023172608" },
   });
   clock.t += 3600_000;
   await quarantine.recordReport(first, { reference: "NCA-1", reportedAt: new Date(clock.t).toISOString() }, "admin:1");
   const sameImage = await quarantine.put({
-    detection: detection({ pdq: Buffer.alloc(32, 9).toString("base64"), user_id: "300000000000000001" }),
+    detection: detection({ pdq: Buffer.alloc(32, 9).toString("base64"), user_id: "300000000000000001", guild_id: "500000000000000002" }),
     content: Buffer.from("b"),
     subject: { user_id: "300000000000000001" },
   });
   clock.t += 3600_000;
   await quarantine.recordReport(sameImage, { reference: "NCA-2", reportedAt: new Date(clock.t).toISOString() }, "admin:1");
   const unrelated = await quarantine.put({
-    detection: detection({ pdq: Buffer.alloc(32, 3).toString("base64"), user_id: "300000000000000002" }),
+    detection: detection({ pdq: Buffer.alloc(32, 3).toString("base64"), user_id: "300000000000000002", guild_id: "500000000000000003" }),
     content: Buffer.from("c"),
     subject: { user_id: "300000000000000002" },
   });
@@ -393,7 +393,7 @@ test("a report says it relates to an earlier one about the same user or the same
 
   // Same user as the first, same image as the second.
   const now = await quarantine.put({
-    detection: detection({ pdq: Buffer.alloc(32, 9).toString("base64") }),
+    detection: detection({ pdq: Buffer.alloc(32, 9).toString("base64"), guild_id: "500000000000000004" }),
     content: Buffer.from("d"),
     subject: { user_id: "254307281023172608" },
   });
@@ -1129,4 +1129,83 @@ test("NCA: a later match from the same uploader goes in a supplementary report, 
   assert.match(lines, new RegExp(`The reported file was sent with ${record.report.reference}`));
   const [l] = (await quarantine.list("admin:1")).filter((r) => r.id === later);
   assert.ok(l.included_in);
+});
+
+// ---------------------- NCA: one incident, how it was posted, chat record
+
+test("NCA: reports from the same server within two weeks name each other; match type and how it was posted are stated", async () => {
+  const { quarantine } = storeAt({ t: Date.parse("2026-11-05T10:05:00Z") });
+  const put = (user, extra = {}) =>
+    quarantine.put({
+      detection: detection({ category: "csam", user_id: user, guild_id: "777", match_type: "near" }),
+      content: GIF,
+      fileName: "x.gif",
+      subject: { user_id: user, guild_id: "777", channel_id: "8", message_id: "9" },
+      relevantData: { posted_as: "as an ordinary message by the account", message: { id: "9", content: "" } },
+      ...extra,
+    });
+  const a = await put("100000000000000001");
+  const { calls, fetchImpl } = typedFetch(okN);
+  const first = await quarantine.submitToNca(a, "system:auto-report", { ...NCA, fetchImpl });
+  const b = await put("100000000000000002");
+  await quarantine.submitToNca(b, "system:auto-report", { ...NCA, fetchImpl });
+  const summary = calls[1].submission.reportedInformation.incidentSummary;
+  assert.ok(summary.relatedPreviousReferrals.split(",").includes(first.record.report.reference));
+  assert.match(summary.additionalInfo, /near-duplicate match\. Not viewed by Quark\. How it was posted: as an ordinary message by the account\./);
+});
+
+test("NCA: the chat record is attached when switched on, and can be sent alone as a supplementary report", async () => {
+  const { quarantine } = storeAt({ t: Date.parse("2026-11-05T10:05:00Z") });
+  const id = await quarantine.put({
+    detection: detection({ category: "csam", user_id: "100000000000000001" }),
+    content: GIF,
+    fileName: "x.gif",
+    subject: { user_id: "100000000000000001", username: "someone" },
+    relevantData: {
+      message: { id: "9", channel_id: "8", created_at: "2026-11-05T10:00:00Z", content: "", attachments: [{ name: "x.gif", size: 47 }] },
+      posted_as: "as an ordinary message by the account",
+      cached_messages: {
+        messages: [{ id: "5", channel_id: "8", created_at: "2026-11-04T10:00:00Z", content: "hello there" }],
+        messages_to_user: [{ id: "6", author_id: "200000000000000002", channel_id: "8", created_at: "2026-11-04T11:00:00Z", content: "hi <@100000000000000001>", reply_to: "5" }],
+      },
+    },
+  });
+  const { calls, fetchImpl } = typedFetch(okN);
+  await quarantine.submitToNca(id, "system:auto-report", { ...NCA, fetchImpl });
+  assert.deepEqual(calls[0].files.map((f) => f.name), ["x.gif", "quark-report.json"]);
+  await assert.rejects(quarantine.submitSupplementary(id, "admin:1", { ...NCA, fetchImpl }), /Nothing to supplement/);
+  await quarantine.submitSupplementary(id, "admin:1", { ...NCA, fetchImpl }, {}, { chatDocument: true });
+  assert.deepEqual(calls[1].files.map((f) => [f.name, f.type]), [[`chat-log-${id}.txt`, "text/plain"], ["quark-report.json", "application/json"]]);
+  const lines = calls[1].submission.reportedInformation.additionalInformation.map((l) => l.value).join("\n");
+  assert.match(lines, /the chat record Quark holds for SR-CSEAIRP-\d+, as a readable document/);
+  assert.match(lines, /The reported file was sent with SR-CSEAIRP-\d+ and is not repeated here/);
+
+  const id2 = await quarantine.put({ detection: detection({ category: "csam" }), content: GIF, fileName: "y.gif", subject: {} });
+  await quarantine.submitToNca(id2, "system:auto-report", { ...NCA, chatDocument: "txt", fetchImpl });
+  assert.deepEqual(calls[2].files.map((f) => f.name), ["y.gif", `chat-log-${id2}.txt`, "quark-report.json"]);
+});
+
+test("NCA: the chat record reads as a document, with no links", async () => {
+  const { chatDocument } = await import("../dist/src/quarantine/nca.js");
+  const text = chatDocument(
+    { id: "abc", report: { reference: "SR-CSEAIRP-9" } },
+    {
+      "3_user": { username: "someone", discord_user_id: "1" },
+      "6_when_and_where": { discord_server_id: "777", discord_server_name: "Srv", discord_channel_id: "8", discord_message_id: "9" },
+      "7_relevant_data_two_weeks": {
+        at_match: {
+          message: { id: "9", channel_id: "8", created_at: "2026-11-05T10:00:00Z", content: "", attachments: [{ name: "x.gif", size: 47 }] },
+          posted_as: "as an ordinary message by the account",
+          cached_messages: { messages: [], messages_to_user: [{ id: "6", author_id: "2", channel_id: "8", created_at: "2026-11-04T11:00:00Z", content: "hi", reply_to: "5" }] },
+        },
+        added_since: { website: { logs: { ok: false, error: "archive down" }, moderation_cases: { ok: true, rows: [] } } },
+      },
+    },
+  );
+  assert.match(text, /NCA reference: SR-CSEAIRP-9/);
+  assert.match(text, /\[2026-11-05 10:00:00 UTC\] someone \(1\) in channel 8 \(message 9\):\n    \(no text\)\n    \[attachment: x\.gif, 47 bytes\]\n    Posted as an ordinary message by the account\./);
+  assert.match(text, /2\. THE USER'S OTHER MESSAGES.*\(0\)[\s\S]*None held\./);
+  assert.match(text, /\[2026-11-04 11:00:00 UTC\] 2 in channel 8 \(message 6\), replying to message 5:\n    hi/);
+  assert.match(text, /Log archive: could not be read \(archive down\)\./);
+  assert.doesNotMatch(text, /https?:/);
 });

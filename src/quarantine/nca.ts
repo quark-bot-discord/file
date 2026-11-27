@@ -39,6 +39,12 @@ export interface NcaConfig {
     phoneCountryCode: string;
   };
   fetchImpl?: typeof fetch;
+  /**
+   * Attach a readable chat document (chat-log-<id>.txt) to every report.
+   * Off until the NCA confirms the file type (NCA_CHAT_DOCUMENT=txt); it can
+   * always be sent on its own in a supplementary report.
+   */
+  chatDocument?: "txt";
   /** Tests only: the roots trusted when the server's chain has to be completed. */
   rootCertificates?: readonly string[];
 }
@@ -46,6 +52,7 @@ export interface NcaConfig {
 /** The API's settings, or undefined while any is missing. */
 export function ncaConfigFromEnv(env: NodeJS.ProcessEnv = process.env): NcaConfig | undefined {
   const apiKey = env.NCA_API_KEY;
+  const chatDocument = env.NCA_CHAT_DOCUMENT === "txt" ? ("txt" as const) : undefined;
   const orgId = env.NCA_ORG_ID;
   const firstName = env.NCA_REPORTER_FIRST_NAME;
   const lastName = env.NCA_REPORTER_LAST_NAME;
@@ -63,6 +70,7 @@ export function ncaConfigFromEnv(env: NodeJS.ProcessEnv = process.env): NcaConfi
       phone: env.NCA_REPORTER_PHONE || "",
       phoneCountryCode: env.NCA_REPORTER_PHONE_CC || "+44",
     },
+    ...(chatDocument ? { chatDocument } : {}),
   };
 }
 
@@ -313,7 +321,7 @@ export function ncaPayload(item: QuarantineItem, fields: Fields, config: NcaConf
         methodOfDetection: methodOf(item),
         additionalInfo: item.intake
           ? `Reported to Quark (${item.intake.route}). ${item.intake.summary ?? ""} Not viewed by Quark.`.slice(0, 4000)
-          : `${how.method} Classification: ${how.classification}. Not viewed by Quark.`,
+          : `${how.method} Classification: ${how.classification}${how.match_type ? `, ${how.match_type === "near" ? "near-duplicate" : how.match_type} match` : ""}. Not viewed by Quark.${postedAsLine(fields) ? ` ${postedAsLine(fields)}` : ""}`.slice(0, 4000),
         relatedPreviousReferrals: previous.join(","),
         additionalDocuments: [],
       },
@@ -684,4 +692,84 @@ export function endsProperly(bytes: Buffer): boolean | null {
   }
   if (kind === "webp") return bytes.length >= 12 && bytes.readUInt32LE(4) + 8 <= bytes.length;
   return null;
+}
+
+type Snap = {
+  message?: Record<string, any> | null;
+  posted_as?: string;
+  account?: Record<string, any> | null;
+  guild?: { id?: string; name?: string | null } | null;
+  cached_messages?: { messages?: Record<string, any>[]; truncated?: boolean; messages_to_user?: Record<string, any>[]; messages_to_user_truncated?: boolean } | null;
+};
+
+/** "Posted as an ordinary message by the account", from the bot's snapshot. */
+export function postedAsLine(fields: { "7_relevant_data_two_weeks": unknown }): string | null {
+  const at = (fields["7_relevant_data_two_weeks"] as { at_match?: Snap | null } | undefined)?.at_match;
+  return at?.posted_as ? `How it was posted: ${at.posted_as}.` : null;
+}
+
+/** "2026-11-24 05:17:00 UTC" */
+const when = (value: unknown) =>
+  typeof value === "string" && value ? `${value.slice(0, 19).replace("T", " ")} UTC` : "time unknown";
+
+function messageLine(m: Record<string, any>, who?: string): string[] {
+  const out = [`[${when(m.created_at)}] ${who ?? m.author_id ?? "?"} in channel ${m.channel_id ?? "?"} (message ${m.id ?? "?"})${m.reply_to ? `, replying to message ${m.reply_to}` : ""}${m.forwarded ? ", forwarded" : ""}${m.webhook_id ? ", via webhook" : ""}${m.edited_at ? `, edited ${when(m.edited_at)}` : ""}:`];
+  out.push(`    ${m.content ? String(m.content).replace(/\n/g, "\n    ") : "(no text)"}`);
+  for (const a of m.attachments ?? []) out.push(`    [attachment: ${a.name ?? "unnamed"}, ${a.size ?? "?"} bytes]`);
+  if (m.embeds) out.push(`    [${m.embeds} embed(s)]`);
+  return out;
+}
+
+/**
+ * A readable chat document for one report: the posting message, the user's
+ * own messages and others' messages to them from the two weeks before (as
+ * captured at the match), and what the website logged. Text only: message
+ * records hold no links, and files are named, never included.
+ */
+export function chatDocument(item: { id: string; report?: { reference?: string } | null }, fields: Record<string, any>): string {
+  const rd = fields["7_relevant_data_two_weeks"] ?? {};
+  const at: Snap = rd.at_match ?? {};
+  const user = fields["3_user"] ?? {};
+  const where = fields["6_when_and_where"] ?? {};
+  const who = `${user.username ?? "?"} (${user.discord_user_id ?? "?"})`;
+  const lines: string[] = [
+    "QUARK BOT LIMITED - CHAT RECORD FOR A CSEA REPORT",
+    "",
+    `Quarantine item: ${item.id}${item.report?.reference ? `   NCA reference: ${item.report.reference}` : ""}`,
+    `Reported user: ${who}`,
+    `Discord server: ${where.discord_server_id ?? "?"}${where.discord_server_name ? ` (${where.discord_server_name})` : ""}   Channel: ${where.discord_channel_id ?? "?"}   Message: ${where.discord_message_id ?? "?"}`,
+    "All times UTC. Captured automatically when the file was detected. Text only: files are named, never included. No one at Quark has viewed the reported file.",
+    "",
+    "1. THE MESSAGE THE FILE WAS POSTED WITH",
+  ];
+  if (at.message) lines.push(...messageLine(at.message, who), ...(at.posted_as ? [`    Posted ${at.posted_as}.`] : []));
+  else lines.push("    Not captured.");
+  const own = at.cached_messages?.messages ?? [];
+  lines.push("", `2. THE USER'S OTHER MESSAGES IN THIS SERVER, TWO WEEKS BEFORE (${own.length}${at.cached_messages?.truncated ? "+" : ""})`);
+  lines.push("    As held in Quark's message cache at detection (12 hours to 30 days, by the server's plan).");
+  if (!own.length) lines.push("    None held.");
+  for (const m of [...own].reverse()) lines.push(...messageLine(m, who));
+  const toUser = at.cached_messages?.messages_to_user;
+  lines.push("", `3. OTHER PEOPLE'S MESSAGES REPLYING TO OR MENTIONING THE USER, TWO WEEKS BEFORE${toUser ? ` (${toUser.length}${at.cached_messages?.messages_to_user_truncated ? "+" : ""})` : ""}`);
+  if (!toUser) lines.push("    Not captured for this item (captured for matches from 27 November 2026).");
+  else if (!toUser.length) lines.push("    None held.");
+  for (const m of [...(toUser ?? [])].reverse()) lines.push(...messageLine(m));
+  const web = (rd.added_since ?? {}).website ?? null;
+  lines.push("", "4. EVENTS QUARK LOGGED ABOUT THE USER IN THIS SERVER, TWO WEEKS BEFORE");
+  if (!web) lines.push("    Not captured for this item.");
+  else {
+    for (const [label, part] of [["Log archive", web.logs], ["Moderation cases", web.moderation_cases], ["Tickets", web.tickets]] as const) {
+      const p = part as { ok?: boolean; rows?: unknown[]; truncated?: boolean; error?: string } | undefined;
+      if (!p) continue;
+      if (p.ok === false) {
+        lines.push(`  ${label}: could not be read (${p.error ?? "error"}).`);
+        continue;
+      }
+      lines.push(`  ${label}: ${p.rows?.length ?? 0}${p.truncated ? "+" : ""}`);
+      for (const row of p.rows ?? []) lines.push(`    ${JSON.stringify(row)}`);
+    }
+  }
+  if (rd.at_match_error) lines.push("", `Note: the snapshot at detection reported an error: ${rd.at_match_error}`);
+  lines.push("", "END OF RECORD");
+  return lines.join("\n");
 }

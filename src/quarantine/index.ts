@@ -54,6 +54,7 @@ import exifr from "exifr";
 import sharp from "sharp";
 import type { Detection } from "../scan/scanner.js";
 import {
+  chatDocument,
   endsProperly,
   mediaNameAndType,
   NcaLocalError,
@@ -217,6 +218,8 @@ export interface QuarantineReference {
   pdq: string;
   /** Who it was about, so a later report can say it relates to this one. */
   user_id?: string;
+  /** Where, so a later report from the same server can name this one. */
+  guild_id?: string;
   expires_at: string;
   hold?: QuarantineRecord["hold"];
   /** References of supplementary reports, kept as long as this one. */
@@ -782,13 +785,15 @@ export class Quarantine {
 
   /**
    * Reports already sent that this one relates to (Schedule 1: "whether it
-   * relates to a previous report"): the same Discord user, or the same image
-   * by its PDQ hash. Read from the kept references, which outlive their
+   * relates to a previous report"): the same Discord user, the same image
+   * by its PDQ hash, or the same server within two weeks either side (one
+   * incident in one server, reported per file). Read from the kept references, which outlive their
    * items. References made before `user_id` was kept match by image only,
    * unless their item is still here to say who it was about.
    */
   async previousReports(item: QuarantineRecord): Promise<PreviousReport[]> {
     const userId = item.subject.user_id ?? item.detection.user_id;
+    const guildId = item.subject.guild_id ?? item.detection.guild_id;
     const out: PreviousReport[] = [];
     for (const name of await this.listNames("references/")) {
       const plain = await this.getSealed(name);
@@ -796,23 +801,30 @@ export class Quarantine {
       const kept = JSON.parse(plain.toString("utf8")) as QuarantineReference;
       if (kept.id === item.id) continue;
       let keptUser = kept.user_id;
-      if (!keptUser) {
+      let keptGuild = kept.guild_id;
+      if (!keptUser || !keptGuild) {
         try {
           const other = await this.readRecord(kept.id);
-          keptUser = other.subject.user_id ?? other.detection.user_id;
+          keptUser = keptUser ?? other.subject.user_id ?? other.detection.user_id;
+          keptGuild = keptGuild ?? other.subject.guild_id ?? other.detection.guild_id;
         } catch (error) {
           if (!(error instanceof QuarantineNotFound)) throw error;
         }
       }
       const sameUser = !!userId && keptUser === userId;
       const sameImage = !!kept.pdq && kept.pdq === item.detection.pdq;
-      if (!sameUser && !sameImage) continue;
+      const sameServer =
+        !!guildId &&
+        keptGuild === guildId &&
+        Math.abs(Date.parse(kept.detected_at) - Date.parse(item.detected_at)) <= 14 * 24 * 60 * 60 * 1000;
+      if (!sameUser && !sameImage && !sameServer) continue;
       out.push({
         reference: kept.reference,
         reported_at: kept.reported_at,
         quarantine_id: kept.id,
-        relates_by:
-          sameUser && sameImage ? "same user and image" : sameUser ? "same user" : "same image",
+        relates_by: [sameUser && "same user", sameImage && "same image", sameServer && "same server within two weeks"]
+          .filter(Boolean)
+          .join(", "),
       });
     }
     return out.sort((a, b) => a.reported_at.localeCompare(b.reported_at));
@@ -963,6 +975,7 @@ export class Quarantine {
       extraLines = [],
       related = [],
       others = [],
+      chatOnly = false,
     }: {
       withoutFile?: string;
       /** The main file went with this earlier report: not sent again. */
@@ -971,6 +984,8 @@ export class Quarantine {
       related?: string[];
       /** The same uploader's other matches, attached after the main file. */
       others?: QuarantineRecord[];
+      /** Send the chat document whatever the setting (a supplementary report for it). */
+      chatOnly?: boolean;
     } = {},
   ) {
     const item = await this.readItem(id);
@@ -1025,6 +1040,14 @@ export class Quarantine {
       lines.push(
         `Attached as other relevant information (reg. 6(4)(d)): ${included.length} further match${included.length === 1 ? "" : "es"} from the same uploader that Arachnid Shield classified harmful-abusive-material (below C3P's multi-jurisdiction criminal threshold; not assessed under UK law; not viewed by Quark). Each is described in its uploadedFile entry.`,
       );
+    if (config.chatDocument === "txt" || chatOnly) {
+      files.push({
+        name: `chat-log-${record.id}.txt`,
+        type: "text/plain",
+        bytes: Buffer.from(chatDocument({ id: record.id, report: record.report }, fields), "utf8"),
+      });
+      lines.push(`The chat record Quark holds for this report is attached as chat-log-${record.id}.txt (plain text).`);
+    }
     const reportFile = {
       name: "quark-report.json",
       type: "application/json",
@@ -1149,6 +1172,7 @@ export class Quarantine {
     actor: string,
     config: NcaConfig,
     app: AppReportData = {},
+    { chatDocument: chatOnly = false }: { chatDocument?: boolean } = {},
   ): Promise<{ record: QuarantineRecord; result: NcaResult }> {
     const record = await this.readRecord(id);
     const report = record.report;
@@ -1161,7 +1185,9 @@ export class Quarantine {
         ? `${report.reference} was sent without the file (${report.file_not_sent})`
         : others.length
           ? `further matches from the same uploader, found since ${report.reference}`
-          : null;
+          : chatOnly
+            ? `the chat record Quark holds for ${report.reference}, as a readable document, at the NCA's request`
+            : null;
     if (!why) throw new Error("Nothing to supplement: the report was sent with its file, the NCA has not said it is missing, and there are no further matches from the uploader");
     const at = this.now().toISOString();
     const earlier = [report.reference, ...(record.supplementary ?? []).map((s) => s.reference)];
@@ -1174,6 +1200,7 @@ export class Quarantine {
         ],
         related: earlier,
         others,
+        chatOnly,
         ...(resend ? {} : { mainSentWith: report.reference }),
       });
       if (!built.files.some((f) => f.name !== "quark-report.json"))
@@ -1263,6 +1290,7 @@ export class Quarantine {
       category: record.detection.category,
       pdq: record.detection.pdq,
       user_id: record.subject.user_id ?? record.detection.user_id,
+      guild_id: record.subject.guild_id ?? record.detection.guild_id,
       expires_at: addDays(reportedIso, REFERENCE_RETENTION_DAYS),
     };
     kept.hold = record.hold;
@@ -1427,7 +1455,7 @@ export interface PreviousReport {
   reference: string;
   reported_at: string;
   quarantine_id: string;
-  relates_by: "same user" | "same image" | "same user and image";
+  relates_by: string;
 }
 
 export type ExifResult =
