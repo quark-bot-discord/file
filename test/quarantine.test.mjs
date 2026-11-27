@@ -1209,3 +1209,58 @@ test("NCA: the chat record reads as a document, with no links", async () => {
   assert.match(text, /Log archive: could not be read \(archive down\)\./);
   assert.doesNotMatch(text, /https?:/);
 });
+
+// ------------------------------ NCA: the channel around the file (±15 min)
+
+test("NCA: a match waits for the channel's messages around it, then reports with them", async () => {
+  const clock = { t: Date.parse("2026-11-05T10:00:00Z") };
+  const { quarantine } = storeAt(clock);
+  const id = await quarantine.put({ detection: detection({ category: "csam" }), content: GIF, fileName: "x.gif", subject: {} });
+  await quarantine.expectChannelContext(id, "2026-11-05T10:15:00.000Z", "system:bot");
+  await quarantine.expectChannelContext(id, "2026-11-05T10:12:00.000Z", "system:bot"); // never moved earlier
+  let [rec] = await quarantine.list("admin:1");
+  assert.equal(quarantine.autoReportBlocker(rec), "waiting for the channel's messages around it (until 10:15 UTC)");
+
+  // A partial capture at the match does not end the wait.
+  await quarantine.addRelevantData(id, "channel-context", { complete: false, messages: [] }, "system:bot");
+  [rec] = await quarantine.list("admin:1");
+  assert.match(quarantine.autoReportBlocker(rec), /^waiting/);
+
+  // Extended by a later match in the same channel.
+  await quarantine.expectChannelContext(id, "2026-11-05T10:25:00.000Z", "system:bot");
+  clock.t = Date.parse("2026-11-05T10:20:00Z");
+  await quarantine.addRelevantData(
+    id,
+    "channel-context",
+    {
+      complete: true,
+      channel_id: "8",
+      from: "2026-11-05T09:45:00.000Z",
+      to: "2026-11-05T10:25:00.000Z",
+      extended: true,
+      messages: [{ id: "1", author_id: "2", channel_id: "8", created_at: "2026-11-05T09:58:00Z", content: "anyone got more" }],
+    },
+    "system:bot",
+  );
+  [rec] = await quarantine.list("admin:1");
+  assert.equal(rec.channel_context.messages, 1);
+  assert.equal(quarantine.autoReportBlocker(rec), null);
+
+  const { chatDocument } = await import("../dist/src/quarantine/nca.js");
+  const fields = await quarantine.reportFields(id, "admin:1");
+  const text = chatDocument({ id }, fields);
+  assert.match(text, /5\. THE CHANNEL AROUND THE FILE, ALL USERS[\s\S]*2026-11-05 09:45:00 UTC to 2026-11-05 10:25:00 UTC \(extended: further matches followed in this channel\)\. 1 message\(s\)\.\n\[2026-11-05 09:58:00 UTC\] 2 in channel 8 \(message 1\):\n    anyone got more/);
+});
+
+test("NCA: if the channel's messages never arrive, the report goes 10 minutes after the window", async () => {
+  const clock = { t: Date.parse("2026-11-05T10:00:00Z") };
+  const { quarantine } = storeAt(clock);
+  const id = await quarantine.put({ detection: detection({ category: "csam" }), content: GIF, fileName: "x.gif", subject: {} });
+  await quarantine.expectChannelContext(id, "2026-11-05T10:15:00.000Z", "system:bot");
+  clock.t = Date.parse("2026-11-05T10:24:59Z");
+  let [rec] = await quarantine.list("admin:1");
+  assert.match(quarantine.autoReportBlocker(rec), /^waiting/);
+  clock.t = Date.parse("2026-11-05T10:25:01Z");
+  [rec] = await quarantine.list("admin:1");
+  assert.equal(quarantine.autoReportBlocker(rec), null);
+});

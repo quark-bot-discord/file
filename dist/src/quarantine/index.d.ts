@@ -1,5 +1,7 @@
 import type { Detection } from "../scan/scanner.js";
 import { type NcaConfig, type NcaResult } from "./nca.js";
+/** How long past its window a report waits for the channel's messages. */
+export declare const CONTEXT_WAIT_MS: number;
 /** reg 8: content, report, basis and relevant data. */
 export declare const RETENTION_DAYS = 365;
 /** reg 8: the report reference. */
@@ -94,6 +96,17 @@ export interface QuarantineRecord {
         item: string;
         reference: string;
         at: string;
+    };
+    /**
+     * The channel's messages from 15 minutes before to 15 minutes after the
+     * match (all users; extended while further matches follow in the same
+     * channel), added by the bot as the `channel-context` part once the window
+     * closes. The report waits for it, up to 10 minutes past `pending_until`.
+     */
+    channel_context?: {
+        pending_until: string;
+        done_at?: string;
+        messages?: number;
     };
     /** Supplementary reports (SI 2026/268 reg. 6(5)), oldest first. */
     supplementary?: Array<{
@@ -308,6 +321,12 @@ export declare class Quarantine {
      * adds what it holds (archive rows, cases, tickets) to a bot's match.
      */
     addRelevantData(id: string, part: string, data: unknown, actor: string): Promise<void>;
+    /**
+     * The bot will add the channel's messages around this match once its
+     * window closes at `until` (moved later while further matches follow).
+     * Until then, and 10 minutes after, it is not reported automatically.
+     */
+    expectChannelContext(id: string, until: string, actor: string): Promise<void>;
     /** How urgent the report is. */
     setPriority(id: string, level: Priority, actor: string): Promise<QuarantineRecord>;
     /**
