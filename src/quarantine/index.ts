@@ -66,6 +66,8 @@ import {
 } from "./nca.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+/** How long past its window a report waits for the channel's messages. */
+export const CONTEXT_WAIT_MS = 10 * 60 * 1000;
 /** reg 8: content, report, basis and relevant data. */
 export const RETENTION_DAYS = 365;
 /** reg 8: the report reference. */
@@ -147,6 +149,13 @@ export interface QuarantineRecord {
    * match attached to a `csam` report. Kept a year from that report.
    */
   included_in?: { item: string; reference: string; at: string };
+  /**
+   * The channel's messages from 15 minutes before to 15 minutes after the
+   * match (all users; extended while further matches follow in the same
+   * channel), added by the bot as the `channel-context` part once the window
+   * closes. The report waits for it, up to 10 minutes past `pending_until`.
+   */
+  channel_context?: { pending_until: string; done_at?: string; messages?: number };
   /** Supplementary reports (SI 2026/268 reg. 6(5)), oldest first. */
   supplementary?: Array<{
     reference: string;
@@ -666,12 +675,36 @@ export class Quarantine {
     actor: string,
   ): Promise<void> {
     if (!/^[a-z0-9-]{1,32}$/.test(part)) throw new Error("Bad part name");
-    await this.readRecord(id);
+    const record = await this.readRecord(id);
     await this.putSealed(
       `items/${id}/relevant/${part}`,
       Buffer.from(JSON.stringify(data)),
     );
+    const done = part === "channel-context" && (data as { complete?: boolean } | null)?.complete === true;
+    if (done) {
+      record.channel_context = {
+        pending_until: record.channel_context?.pending_until ?? this.now().toISOString(),
+        done_at: this.now().toISOString(),
+        messages: ((data as { messages?: unknown[] }).messages ?? []).length,
+      };
+      await this.writeRecord(record);
+    }
     await this.logAccess({ actor, action: "add_relevant_data", id, detail: part });
+  }
+
+  /**
+   * The bot will add the channel's messages around this match once its
+   * window closes at `until` (moved later while further matches follow).
+   * Until then, and 10 minutes after, it is not reported automatically.
+   */
+  async expectChannelContext(id: string, until: string, actor: string): Promise<void> {
+    const record = await this.readRecord(id);
+    if (record.report || record.channel_context?.done_at) return;
+    const current = record.channel_context?.pending_until;
+    if (current && current >= until) return;
+    record.channel_context = { pending_until: until };
+    await this.writeRecord(record);
+    await this.logAccess({ actor, action: "add_relevant_data", id, detail: `channel-context expected until ${until}` });
   }
 
   /** How urgent the report is. */
@@ -857,6 +890,9 @@ export class Quarantine {
    */
   autoReportBlocker(record: QuarantineSummary, others: QuarantineSummary[] = []): string | null {
     if (record.report) return "already reported";
+    const ctx = record.channel_context;
+    if (ctx && !ctx.done_at && this.now().getTime() < Date.parse(ctx.pending_until) + CONTEXT_WAIT_MS)
+      return `waiting for the channel's messages around it (until ${ctx.pending_until.slice(11, 16)} UTC)`;
     if (record.included_in)
       return `sent to the NCA with ${record.included_in.reference} as other relevant information (same uploader)`;
     if (record.nca?.paused) return `paused: ${record.nca.paused.reason}`;

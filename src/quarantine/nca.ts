@@ -769,6 +769,16 @@ export function chatDocument(item: { id: string; report?: { reference?: string }
       for (const row of p.rows ?? []) lines.push(`    ${JSON.stringify(row)}`);
     }
   }
+  const ctx = (rd.added_since ?? {})["channel-context"] ?? null;
+  lines.push("", "5. THE CHANNEL AROUND THE FILE, ALL USERS (15 MINUTES BEFORE TO 15 MINUTES AFTER)");
+  if (!ctx) lines.push("    Not captured for this item (captured for matches from 27 November 2026).");
+  else {
+    lines.push(
+      `    Channel ${ctx.channel_id ?? where.discord_channel_id ?? "?"}, ${when(ctx.from)} to ${when(ctx.to)}${ctx.extended ? " (extended: further matches followed in this channel)" : ""}${ctx.complete === false ? " (partial: captured at the match only)" : ""}. ${ctx.messages?.length ?? 0}${ctx.truncated ? "+" : ""} message(s).`,
+    );
+    if (!ctx.messages?.length) lines.push("    None held.");
+    for (const m of ctx.messages ?? []) lines.push(...messageLine(m));
+  }
   if (rd.at_match_error) lines.push("", `Note: the snapshot at detection reported an error: ${rd.at_match_error}`);
   lines.push("", "END OF RECORD");
   return lines.join("\n");
